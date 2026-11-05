@@ -34,6 +34,8 @@ jobs:
           docker run --rm \
             -v "$PWD/workloads/k8s:/workloads:ro" \
             python:3.11-slim python -B -m unittest discover -s /workloads/tests -v
+      - name: Test synthetic customer workload
+        run: node --test workloads/k8s/tests/mission-customers.test.cjs
       - name: Run mission Node tests when present
         working-directory: workloads/webapp
         run: |
