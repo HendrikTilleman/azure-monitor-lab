@@ -20,6 +20,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using AmlabHello.MissionControl;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddJsonFile("lab-console.json", optional: true, reloadOnChange: false).AddEnvironmentVariables();
@@ -32,6 +33,7 @@ builder.Services.AddSingleton<ISreModel, SreModel>();
 builder.Services.AddSingleton<SreAssistant>();
 builder.Services.AddSingleton<InfrastructureHealthService>();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddMissionPortal();
 builder.Services.AddSingleton<ILabOperationsRunner>(services => new ContainerJobOperations(
     services.GetRequiredService<IConfiguration>(), services.GetRequiredService<IHttpClientFactory>()));
 builder.Services.AddSingleton<LabOperationsJournal>();
@@ -62,6 +64,12 @@ builder.Services.AddHttpClient(Microsoft.Extensions.Options.Options.DefaultName,
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("portal-customers", limiter =>
+    {
+        limiter.PermitLimit = 1200;
+        limiter.Window = TimeSpan.FromMinutes(1);
+        limiter.QueueLimit = 0;
+    });
     options.AddFixedWindowLimiter("lab-operations", limiter =>
     {
         limiter.PermitLimit = 10;
@@ -177,7 +185,10 @@ app.Use(async (context, next) =>
     }
     await next(context);
 });
+app.UseWhen(context => context.Request.Path.StartsWithSegments("/api/portal"),
+    portal => portal.Use(PortalEndpoints.AuthorizeAsync));
 app.UseRateLimiter();
+app.MapPortalEndpoints();
 
 app.MapGet("/api/console/config", (IConfiguration configuration) =>
 {
@@ -357,3 +368,5 @@ static IResult RunInefficient(IHttpClientFactory f)
         containsHits = hits
     });
 }
+
+public partial class Program { }

@@ -1,10 +1,10 @@
 # SRE Mission Control
 
 The scenario is specified in [DESIGN.md](../DESIGN.md). **Implemented so far:
-work item 1's core ledger, month-end report and direct-ledger load test.**
-The portal, mission operations, alerts, agent configuration and screen are later
-work items. These opt-in manifests do not change the existing lab deployment,
-traffic or Lab Operations runner.
+work items 1 and 2: the ledger, report, portal API, business pulse and synthetic
+customers.** Mission operations, alerts, agent configuration and the screen are
+later work items. The portal is disabled by default; the opt-in manifests do not
+change existing lab deployment, traffic or Lab Operations runner behavior.
 
 ## Workload contracts
 
@@ -299,3 +299,245 @@ and 90 total postings/minute, and prints `BENCHMARK` with baseline, final
 not the owner's required 30 minutes; use `--baseline 1800` for that duration.
 `--workers 4 --ramp 5` can reproduce the accelerated nominal-concurrency
 comparison. Do not label local measurements as AKS results.
+
+## Portal API (work item 2)
+
+The existing Control Center hosts two customer-key-protected endpoints outside
+the operator allowlist. They need no operator session, same-origin header or
+sign-in cookie. Existing protected operations remain protected.
+
+| Request | Behavior |
+|---|---|
+| `GET /api/portal/catalog` | Six in-memory Contoso products, EUR prices; records a browse, never calls the ledger. |
+| `POST /api/portal/orders` | Optional JSON `sku` and `quantity`; defaults to `CT-001`, quantity 1. Quantity must be 1-100. Missing/empty JSON body uses defaults. Returns order ID, confirmed/rejected outcome, amount, currency and measured ledger queue time. |
+
+Both require one `X-Lab-Customer-Key` matching configuration (otherwise 401),
+share a dedicated 1,200 requests/minute fixed-window limiter with no queue
+(429 with `Retry-After`), and accept channel `web` (default), `mobile` or
+`partner` through `X-Amlab-Channel`. Invalid JSON/SKU/quantity/channel returns
+400 and is not recorded as an order attempt. Other media types return 415.
+Bodies are limited to 4 KiB. Disabled mode returns 404; an authenticated order
+with missing/invalid ledger configuration returns 503, not a fictional ledger
+result. Catalog browsing still works when the ledger is unavailable.
+
+The ledger client uses only the configured HTTP(S) origin (no userinfo, path,
+query or fragment), sends `X-Client-Id: customer-portal` and the ledger key,
+and disables redirects. A single **three-second total budget** covers connect,
+body reads, and at most one connection-error retry after 150 ms. Timeouts, HTTP
+errors and invalid responses never retry. Response bodies are limited to 16 KiB.
+Failure responses contain `error: order_failed` and a `ledger_` reason:
+`ledger_timeout` or `ledger_queue_timeout` (504), connection refused/reset/error,
+HTTP status, transport error or invalid response (502). Caller cancellation is
+recorded separately as `ledger_request_cancelled`, not a ledger timeout.
+Normal business rejections are HTTP 200 and count as successful attempts.
+
+### Pulse and telemetry
+
+`BusinessPulse` is a thread-safe singleton, retaining one-second buckets in a
+fixed 30-minute ring. It records completed attempts, confirmed/rejected/failed
+outcomes, failure reasons, timings, measured queue waits, confirmed-only revenue,
+browses and last-order time. `Snapshot()` defaults to the trailing 60 one-second
+buckets; `Snapshot(TimeSpan.FromMinutes(5))` provides the acceptance window.
+Both rates use `(confirmed + rejected) / attempts`; empty percentages and
+percentiles are `null`. Percentiles are nearest-rank over actual samples.
+The ten-second series has measured buckets only, never interpolated points.
+This pulse assumes **one App Service instance**, is reset by a process restart,
+and is not yet a public endpoint; protected Mission snapshots arrive in work
+item 6.
+
+The ledger client observes `X-Ledger-Batch-Active` on every received response,
+including non-2xx responses and headers received before a body timeout.
+`BeginSession(startedAt)` resets batch marks for the later coordinator; older
+in-flight requests cannot seed the new session. Positive counts establish the
+first batch observation. After that, a measured zero starts a candidate recovery
+window; a subsequent zero at least 30 seconds later confirms its start time.
+Positive/unknown headers or a gap over five seconds reset the candidate, so
+silence and missing values do not prove recovery. Snapshot reads alone never
+advance a recovery mark.
+
+The existing Application Insights SDK records requests. The client adds a
+correlated `core-ledger` dependency per attempt. Each completed valid order emits
+`PortalOrder` with outcome, failure reason, channel and amount bucket, plus real
+duration/queue measurements. It also includes `pulseSuccessRate5m` and
+`pulseAttempts5m` for the owner comparison before the snapshot API exists.
+`portal.order.failed` records exactly one raw 0/1 metric sample per order;
+its average is the failure ratio. `portal.order.duration` records milliseconds.
+Only portal requests, `core-ledger` dependencies and `PortalOrder` events bypass
+SDK sampling, to preserve this measured evidence; unrelated telemetry keeps its
+existing policy. No customer/ledger keys or order payloads are added to telemetry.
+
+### Owner setup and verification for work item 2
+
+Redeploy the web app with this code first. Use the existing lab resource names
+and AKS context; the following changes are owner-run, not performed by CI.
+Keep the public ledger source ranges restricted as in work item 1.
+
+```bash
+export RESOURCE_GROUP=rg-azure-monitor-lab
+export WEBAPP_NAME='<existing lab web app>'
+export MISSION_TMP="$(mktemp -d)"
+export PORTAL_URL="https://$(az webapp show -g "$RESOURCE_GROUP" -n "$WEBAPP_NAME" \
+  --query defaultHostName -o tsv)"
+export LEDGER_URL="http://$(kubectl get service core-ledger-public -n demo \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+export CUSTOMER_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export LEDGER_KEY="$(kubectl get secret mission-ledger -n demo -o jsonpath='{.data.key}' | base64 --decode)"
+az webapp config appsettings set -g "$RESOURCE_GROUP" -n "$WEBAPP_NAME" --settings \
+  LabConsole__Mission__Enabled=true \
+  LabConsole__Mission__LedgerBaseUrl="$LEDGER_URL" \
+  LabConsole__Mission__LedgerKey="$LEDGER_KEY" \
+  LabConsole__Mission__CustomerKey="$CUSTOMER_KEY" --output none
+unset LEDGER_KEY
+kubectl create secret generic mission-portal -n demo \
+  --from-literal=customer-key="$CUSTOMER_KEY" --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**App Service Easy Auth executes before Program.cs.** If it requires sign-in
+globally, exclude **only** `/api/portal/*`; do not turn off authentication or
+exclude the operator APIs. The following preserves all other auth settings:
+
+```bash
+export WEBAPP_ID="$(az webapp show -g "$RESOURCE_GROUP" -n "$WEBAPP_NAME" --query id -o tsv)"
+az rest --method get \
+  --url "https://management.azure.com$WEBAPP_ID/config/authsettingsV2?api-version=2024-11-01" \
+  > "$MISSION_TMP/auth-before.json"
+python3 - <<'PY'
+import json, os, pathlib
+root = pathlib.Path(os.environ["MISSION_TMP"])
+auth = json.loads((root / "auth-before.json").read_text())["properties"]
+validation = auth.setdefault("globalValidation", {})
+paths = validation.setdefault("excludedPaths", [])
+if "/api/portal/*" not in paths:
+    paths.append("/api/portal/*")
+(root / "auth-portal.json").write_text(json.dumps({"properties": auth}))
+PY
+az rest --method put \
+  --url "https://management.azure.com$WEBAPP_ID/config/authsettingsV2?api-version=2024-11-01" \
+  --body @"$MISSION_TMP/auth-portal.json" --output none
+test "$(curl -s -o /dev/null -w '%{http_code}' "$PORTAL_URL/api/portal/catalog")" = 401
+test "$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' -d '{}' "$PORTAL_URL/api/portal/orders")" = 401
+curl --fail-with-body -s -H "X-Lab-Customer-Key: $CUSTOMER_KEY" "$PORTAL_URL/api/portal/catalog"
+curl --fail-with-body -s -H "X-Lab-Customer-Key: $CUSTOMER_KEY" \
+  -H 'Content-Type: application/json' -d '{}' "$PORTAL_URL/api/portal/orders"
+```
+
+Manifest 07 uses pinned public `grafana/k6:1.4.0`. It runs constant-arrival
+scenarios (90 orders/minute and 240 browses/minute) for 100 minutes, choosing
+random SKU/quantity and a 60/30/10 web/mobile/partner mix. Check failures never
+abort the workload; there are no thresholds. It never follows sign-in redirects.
+Its Job deadline is 110 minutes and completion TTL is ten minutes. Render a
+unique Job name and public portal origin; rates/duration are environment values
+that later mission operations will fill. The customer key is Secret-backed,
+not interpolated into the manifest.
+
+```bash
+export CUSTOMERS_JOB="mission-customers-$(date +%s)"
+python3 - <<'PY'
+import os, pathlib, re
+from urllib.parse import urlsplit
+name, url = os.environ["CUSTOMERS_JOB"], os.environ["PORTAL_URL"].rstrip("/")
+assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,61}[a-z0-9]", name)
+parsed = urlsplit(url)
+assert parsed.scheme == "https" and parsed.hostname and not parsed.username
+assert not parsed.query and not parsed.fragment and parsed.path in ("", "/")
+text = pathlib.Path("workloads/k8s/07-mission-customers.yaml").read_text()
+text = text.replace("__MISSION_CUSTOMERS_JOB__", name).replace("__PORTAL_URL__", url)
+pathlib.Path(os.environ["MISSION_TMP"], "customers.yaml").write_text(text)
+PY
+kubectl apply --dry-run=server -f "$MISSION_TMP/customers.yaml"
+kubectl apply -f "$MISSION_TMP/customers.yaml"
+kubectl get pods -n demo -l job-name="$CUSTOMERS_JOB"
+sleep 480
+```
+
+In the existing lab Application Insights **Logs** (not the general Log Analytics
+workspace), run this query after ingestion catches up. Using an event's own
+timestamp as the window end avoids clock-window mismatch; the two-minute
+ingestion buffer leaves a complete five-minute window after the warm-up:
+
+```kusto
+let latest = customEvents
+| where timestamp between (ago(30m) .. ago(2m)) and name == "PortalOrder"
+| top 1 by timestamp desc
+| project End=timestamp, Role=cloud_RoleInstance,
+          PulseRate=todouble(customMeasurements.pulseSuccessRate5m),
+          PulseAttempts=tolong(customMeasurements.pulseAttempts5m);
+let endTime = toscalar(latest | project End);
+let instance = toscalar(latest | project Role);
+// The pulse uses whole one-second buckets, inclusive of the current bucket.
+let startTime = bin(endTime, 1s) - 299s;
+customEvents
+| where name == "PortalOrder" and cloud_RoleInstance == instance
+| where timestamp between (startTime .. endTime)
+| summarize Attempts=sum(itemCount),
+            Successful=sumif(itemCount, tostring(customDimensions.outcome) in ("confirmed", "rejected"))
+| extend InsightsSuccessRate=todouble(Successful)/Attempts,
+         PulseSuccessRate=toscalar(latest | project PulseRate),
+         PulseAttempts=toscalar(latest | project PulseAttempts)
+| extend DifferencePercentagePoints=100*abs(InsightsSuccessRate-PulseSuccessRate)
+```
+
+Require at least five minutes of traffic, nonzero attempts, and difference at
+most **2 percentage points** (also compare attempt counts). Use one App Service
+instance, rerun after ingestion settles, and investigate missing telemetry
+rather than manufacturing agreement. Pulse timestamps use completion buckets;
+events use completion timestamps, not request start timestamps. Minor ordering
+differences between concurrent completions may cause small boundary differences.
+
+Verify every required telemetry surface in the same Application Insights Logs:
+
+```kusto
+requests
+| where timestamp > ago(15m) and url contains "/api/portal/orders"
+| summarize Orders=count(), Failed=countif(success == false), P95Ms=percentile(duration, 95)
+```
+
+```kusto
+dependencies
+| where timestamp > ago(15m) and name == "core-ledger"
+| project timestamp, operation_Id, success, resultCode, duration, target
+```
+
+```kusto
+customEvents
+| where timestamp > ago(15m) and name == "PortalOrder"
+| project timestamp, customDimensions, customMeasurements
+```
+
+```kusto
+customMetrics
+| where timestamp > ago(15m) and name == "portal.order.failed"
+| summarize FailureRate=sum(valueSum)/sum(valueCount), Samples=sum(valueCount) by bin(timestamp, 1m)
+```
+
+During a manual report run (work item 1), order requests must produce genuine
+504s with `ledger_timeout` and failed dependencies, while catalog remains 200.
+Suspend both the CronJob and its active Job afterward using the work-item-1
+commands. Verify recovery through the same sources. Stop only the named
+customers Job when finished:
+
+```bash
+kubectl delete job "$CUSTOMERS_JOB" -n demo
+unset CUSTOMER_KEY
+```
+
+No Azure resources are deleted. The opt-in app settings and Easy Auth exclusion
+remain configured; disable the portal with `LabConsole__Mission__Enabled=false`
+if it is not being used. Full Baseline/End orchestration and the protected
+Mission snapshot endpoint remain later work items.
+
+### Local portal checks
+
+```bash
+dotnet test workloads/webapp.Tests/AmlabHello.Tests.csproj
+node --test workloads/k8s/tests/mission-customers.test.cjs
+```
+
+In addition to deterministic handler/clock tests, a local Kestrel smoke run
+against the actual embedded Python ledger verified a real k6 baseline,
+unauthenticated 401s, a 413 for a body over 4 KiB, and report-driven contention.
+All eight concurrent incident orders timed out at 3.01-3.03 seconds while the
+catalog completed in 2.3 ms; a post-report order measured 0.18 ms queue wait.
+The report ramp was accelerated for this smoke check. These are local results,
+not the five-minute Azure telemetry comparison or an AKS acceptance claim.

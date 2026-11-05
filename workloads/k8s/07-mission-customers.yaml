@@ -1,0 +1,101 @@
+# Render both placeholders before applying; create a unique Job for each session.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mission-customers-code
+  namespace: demo
+data:
+  customers.js: |
+    import http from 'k6/http';
+    import { check } from 'k6';
+
+    const url = (__ENV.PORTAL_URL || '').replace(/\/$/, '');
+    const key = __ENV.CUSTOMER_KEY || '';
+    const orderRate = Number(__ENV.ORDERS_PER_MINUTE || '90');
+    const browseRate = Number(__ENV.BROWSES_PER_MINUTE || '240');
+    const duration = __ENV.DURATION || '100m';
+    if (!/^https?:\/\/[A-Za-z0-9.-]+(:[0-9]+)?$/.test(url) || !key) {
+      throw new Error('Set PORTAL_URL to the lab web app and CUSTOMER_KEY from its Secret.');
+    }
+    if (![orderRate, browseRate].every(rate => Number.isInteger(rate) && rate >= 1 && rate <= 600)) {
+      throw new Error('Rates must be integers between 1 and 600 per minute.');
+    }
+    if (!/^[1-9][0-9]*(s|m)$/.test(duration)
+        || Number(duration.slice(0, -1)) * (duration.endsWith('m') ? 60 : 1) > 6000) {
+      throw new Error('Duration must be between 1 second and 100 minutes.');
+    }
+
+    export const options = {
+      scenarios: {
+        orders: {
+          executor: 'constant-arrival-rate', exec: 'order',
+          rate: orderRate, timeUnit: '1m', duration,
+          preAllocatedVUs: 20, maxVUs: 100, gracefulStop: '10s',
+        },
+        catalog: {
+          executor: 'constant-arrival-rate', exec: 'browse',
+          rate: browseRate, timeUnit: '1m', duration,
+          preAllocatedVUs: 20, maxVUs: 100, gracefulStop: '10s',
+        },
+      },
+    };
+
+    function headers() {
+      const roll = Math.random();
+      return {
+        'X-Lab-Customer-Key': key,
+        'X-Amlab-Channel': roll < 0.6 ? 'web' : roll < 0.9 ? 'mobile' : 'partner',
+        'Content-Type': 'application/json',
+      };
+    }
+
+    export function order() {
+      const sku = `CT-${String(1 + Math.floor(Math.random() * 6)).padStart(3, '0')}`;
+      const quantity = 1 + Math.floor(Math.random() * 3);
+      const response = http.post(`${url}/api/portal/orders`, JSON.stringify({ sku, quantity }),
+        { headers: headers(), timeout: '8s', redirects: 0, tags: { name: 'portal-orders' } });
+      check(response, { 'order completed': r => r.status === 200 });
+    }
+
+    export function browse() {
+      const response = http.get(`${url}/api/portal/catalog`,
+        { headers: headers(), timeout: '8s', redirects: 0, tags: { name: 'portal-catalog' } });
+      check(response, { 'catalog available': r => r.status === 200 });
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __MISSION_CUSTOMERS_JOB__
+  namespace: demo
+  labels: { app: mission-customers }
+spec:
+  activeDeadlineSeconds: 6600
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: mission-customers }
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: customers
+          image: grafana/k6:1.4.0
+          args: ["run", "/scripts/customers.js"]
+          env:
+            - { name: PORTAL_URL, value: "__PORTAL_URL__" }
+            - { name: ORDERS_PER_MINUTE, value: "90" }
+            - { name: BROWSES_PER_MINUTE, value: "240" }
+            - { name: DURATION, value: "100m" }
+            - name: CUSTOMER_KEY
+              valueFrom:
+                secretKeyRef: { name: mission-portal, key: customer-key }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - { name: code, mountPath: /scripts, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: mission-customers-code }
