@@ -1,0 +1,137 @@
+name: Deploy mission alerts
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Apply the alert after validation and preview (otherwise preview only)
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-mission-alerts
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: azure-lab
+    permissions:
+      contents: read
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'rg-azure-monitor-lab' }}
+      APPINSIGHTS_NAME: ${{ vars.APPINSIGHTS_NAME || 'appi-amlab' }}
+      ACTION_GROUP_NAME: ${{ vars.ACTION_GROUP_NAME || 'ag-amlab-email' }}
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, uuid
+          names = ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID",
+                   "AZURE_RESOURCE_GROUP", "APPINSIGHTS_NAME", "ACTION_GROUP_NAME")
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit("Set repository or azure-lab environment variables: " + ", ".join(missing))
+          for name in names[:3]:
+              uuid.UUID(os.environ[name])
+          group = os.environ["AZURE_RESOURCE_GROUP"]
+          if not re.fullmatch(r"[\w().-]{1,90}", group) or group.endswith("."):
+              raise SystemExit("Invalid AZURE_RESOURCE_GROUP")
+          for name in ("APPINSIGHTS_NAME", "ACTION_GROUP_NAME"):
+              if not re.fullmatch(r"[A-Za-z0-9_.()-]{1,260}", os.environ[name]):
+                  raise SystemExit(f"Invalid {name}")
+          PY
+      - name: Sign in with the repository service principal
+        shell: bash
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.azure_lab }}
+        run: |
+          if [[ -z "$AZURE_CLIENT_SECRET" ]]; then
+            echo '::error::Set the azure_lab repository secret to the service-principal client secret.'
+            exit 1
+          fi
+          az login --service-principal --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+      - name: Resolve existing lab resources
+        shell: bash
+        run: |
+          prefix="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.Insights"
+          appinsights_id="$prefix/components/$APPINSIGHTS_NAME"
+          action_group_id="$prefix/actionGroups/$ACTION_GROUP_NAME"
+          az resource show --ids "$appinsights_id"
+          az resource show --ids "$action_group_id"
+          echo "APPINSIGHTS_ID=$appinsights_id" >> "$GITHUB_ENV"
+          echo "ACTION_GROUP_ID=$action_group_id" >> "$GITHUB_ENV"
+      - name: Compile the alert module
+        shell: bash
+        run: |
+          az bicep install --version v0.37.4
+          "$HOME/.azure/bin/bicep" build infra/modules/mission-alerts.bicep \
+            --outfile "$RUNNER_TEMP/mission-alerts.json"
+      - name: Validate and preview the lab alert deployment
+        shell: bash
+        run: |
+          az resource show --ids "$APPINSIGHTS_ID"
+          az resource show --ids "$ACTION_GROUP_ID"
+          az deployment group validate --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file "$RUNNER_TEMP/mission-alerts.json" \
+            --parameters appInsightsId="$APPINSIGHTS_ID" actionGroupId="$ACTION_GROUP_ID"
+          az deployment group what-if --resource-group "$AZURE_RESOURCE_GROUP" \
+            --mode Incremental --template-file "$RUNNER_TEMP/mission-alerts.json" \
+            --parameters appInsightsId="$APPINSIGHTS_ID" actionGroupId="$ACTION_GROUP_ID" \
+            --output json
+      - name: Deploy the lab alert
+        if: inputs.deploy
+        shell: bash
+        run: |
+          az deployment group create --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "mission-alerts-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --mode Incremental --template-file "$RUNNER_TEMP/mission-alerts.json" \
+            --parameters appInsightsId="$APPINSIGHTS_ID" actionGroupId="$ACTION_GROUP_ID"
+      - name: Verify the deployed alert
+        if: inputs.deploy
+        shell: bash
+        run: |
+          az monitor metrics alert show --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name alert-orders-slo-burn --output json > "$RUNNER_TEMP/deployed-alert.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          alert = json.loads((Path(os.environ["RUNNER_TEMP"]) / "deployed-alert.json").read_text())
+          assert alert["name"] == "alert-orders-slo-burn"
+          assert "slo-burn" in alert["description"]
+          assert alert["severity"] == 1 and alert["enabled"] and alert["autoMitigate"]
+          assert alert["evaluationFrequency"] == "PT1M" and alert["windowSize"] == "PT5M"
+          assert [s.lower() for s in alert["scopes"]] == [os.environ["APPINSIGHTS_ID"].lower()]
+          criterion, = alert["criteria"]["allOf"]
+          assert criterion["metricName"] == "portal.order.failed"
+          assert criterion["metricNamespace"].lower() == "azure.applicationinsights"
+          assert criterion["timeAggregation"] == "Average"
+          assert criterion["operator"] == "GreaterThan" and criterion["threshold"] == 0.05
+          assert criterion["skipMetricValidation"]
+          action, = alert["actions"]
+          assert action["actionGroupId"].lower() == os.environ["ACTION_GROUP_ID"].lower()
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("Deployed and verified `alert-orders-slo-burn` configuration.\n\n"
+                            "Metric ingestion, notification delivery and fire/recovery timing "
+                            "still require the owner checks in docs/SRE-MISSION-CONTROL.md.\n")
+          PY
+      - name: Clear Azure credentials
+        if: always()
+        shell: bash
+        run: az account clear

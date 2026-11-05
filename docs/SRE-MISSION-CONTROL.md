@@ -549,7 +549,70 @@ not the five-minute Azure telemetry comparison or an AKS acceptance claim.
 the **existing lab Application Insights component** and notifying the **existing
 lab action group**. It does not modify the main Bicep/Terraform deployment.
 Automatic deployment by `mission-control.ps1 -Action Setup` belongs to work
-item 4; until then the owner can deploy it explicitly as shown below.
+item 4; until then the owner can deploy it explicitly as shown below, or use
+the manually triggered GitHub Actions workflow.
+
+### Deploy from GitHub Actions (service principal)
+
+`.github/workflows/deploy-mission-alerts.yml` runs on a GitHub-hosted runner,
+not the interactive cloud terminal. It deploys **only the alert module** in
+incremental mode; it does not deploy the web app, Kubernetes workloads, or the
+rest of the lab. It never runs on push or pull request. Only `master` is allowed.
+The first run defaults to **preview only**.
+
+An owner with Azure role-assignment permission and GitHub repository
+administration access must configure the following once. Credentials stay in
+GitHub; they are not read by or copied to the interactive cloud terminal.
+
+1. In GitHub, open **Settings > Environments > New environment**, name it
+   `azure-lab`, restrict deployment branches to `master`, and add a required
+   reviewer where your plan supports it. Configure protection before running
+   the workflow; do not rely on an automatically created, unprotected environment.
+2. Use a dedicated **Microsoft Entra app registration / service principal**.
+   Store its client secret **value** (not the secret's ID or credential JSON)
+   in the repository Actions secret **`azure_lab`**. Do not paste it in chat,
+   commit it, or put it in a variable. Rotate it before expiry.
+3. On the **lab resource group's IAM**, grant that service principal **Monitoring
+   Contributor** scoped to that resource group only. This built-in role grants
+   monitoring-resource management and ARM deployment operations; do not grant
+   subscription-wide Contributor or Owner. A stricter custom role can further
+   restrict writes to metric alerts and resource-group deployments if required.
+   If the identity already has subscription-wide Contributor, it can deploy,
+   but an owner should narrow that assignment after granting the lab-scoped role.
+4. In **Settings > Secrets and variables > Actions > Variables**, add the
+   three required repository variables below. Environment variables in
+   `azure-lab` may also be used and take precedence over repository variables.
+
+| Variable | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | App registration's application/client ID, not its object/principal ID |
+| `AZURE_TENANT_ID` | Lab directory/tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Existing lab subscription ID |
+| `AZURE_RESOURCE_GROUP` | Optional; defaults to `rg-azure-monitor-lab` |
+| `APPINSIGHTS_NAME` | Optional; defaults to `appi-amlab` |
+| `ACTION_GROUP_NAME` | Optional; defaults to `ag-amlab-email` |
+
+The defaults match `lab.config.json.example` and `infra/main.bicep` with
+`namePrefix=amlab`. Override them if the deployed lab uses other names. The
+workflow constructs both resource IDs within the configured subscription and
+resource group and fails if either does not exist; it does not search for or
+select another lab. The secret is supplied only to the login step, never
+printed, and Azure's cached credentials are cleared at the end of the job.
+
+After merging the workflow into `master`, go to **Actions > Deploy mission
+alerts > Run workflow**, select `master`, and leave **Apply the alert** unchecked.
+Approve the environment request, if configured, and inspect the validation and
+what-if output. Expect changes only to `alert-orders-slo-burn`. Then run again
+with **Apply the alert** checked to deploy and read back its configuration.
+Runs are serialized; a newer request does not cancel an in-progress deployment.
+
+A green deployment proves the ARM settings were applied, **not** that telemetry
+arrived, a notification was delivered, or the alert fired/resolved on time.
+Complete the owner checks below. If login fails, check the client/tenant IDs
+and secret value/expiry; if authorization fails, check the resource-group role
+assignment and allow for propagation. Passwordless GitHub OIDC is a future
+hardening option; the current workflow explicitly uses the owner-provided
+service-principal secret.
 
 The enabled metric rule `alert-orders-slo-burn` has severity 1, evaluates every
 minute and fires when the five-minute **Average** of `portal.order.failed` is
