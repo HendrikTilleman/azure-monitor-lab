@@ -580,8 +580,10 @@ GitHub; they are not read by or copied to the interactive cloud terminal.
    If the identity already has subscription-wide Contributor, it can deploy,
    but an owner should narrow that assignment after granting the lab-scoped role.
 4. In **Settings > Secrets and variables > Actions > Variables**, add the
-   three required repository variables below. Environment variables in
-   `azure-lab` may also be used and take precedence over repository variables.
+   three required repository variables below. The three IDs may instead be
+   stored as Actions secrets with the **same names**; variables take precedence
+   over secrets. Environment values in `azure-lab` may also be used and take
+   precedence over repository values of the same kind.
 
 | Variable | Value |
 |---|---|
