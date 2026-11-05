@@ -72,6 +72,10 @@ jobs:
           if ($scripts.Count -eq 0) {
             Write-Host 'No mission PowerShell scripts yet; they are added by later work items.'
           }
-          foreach ($script in $scripts) {
-            Invoke-ScriptAnalyzer -Path $script.FullName -Severity Error,Warning -EnableExit
+          $diagnostics = @(foreach ($script in $scripts) {
+            Invoke-ScriptAnalyzer -Path $script.FullName -Severity Error,Warning
+          })
+          if ($diagnostics.Count -gt 0) {
+            $diagnostics | Format-Table -AutoSize
+            throw 'Mission scripts failed PSScriptAnalyzer.'
           }
