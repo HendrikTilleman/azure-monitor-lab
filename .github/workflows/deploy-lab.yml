@@ -4,8 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: Type DEPLOY to create billable lab resources
+        description: Type CHECK for read-only preflight, or DEPLOY to create billable resources
         required: true
+        type: string
+      check_only:
+        description: Only check availability and quota; do not deploy
+        required: true
+        default: true
+        type: boolean
+      location:
+        description: Optional lab region override (for example swedencentral)
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -17,7 +27,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/master' && inputs.confirm == 'DEPLOY'
+    if: github.ref == 'refs/heads/master' && ((inputs.check_only && inputs.confirm == 'CHECK') || (!inputs.check_only && inputs.confirm == 'DEPLOY'))
     environment: azure-lab
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -31,9 +41,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        if: ${{ !inputs.check_only }}
         with:
           dotnet-version: '8.0.x'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: ${{ !inputs.check_only }}
         with:
           node-version: 'lts/*'
           cache: npm
@@ -42,6 +54,7 @@ jobs:
         shell: bash
         env:
           LAB_CONFIG_JSON: ${{ secrets.LAB_CONFIG_JSON }}
+          LAB_LOCATION_OVERRIDE: ${{ inputs.location }}
         run: |
           python3 - <<'PY'
           import json, os, re, uuid
@@ -52,6 +65,8 @@ jobs:
               raise SystemExit("Set LAB_CONFIG_JSON to a valid, completed lab configuration JSON object.")
           if not isinstance(config, dict):
               raise SystemExit("LAB_CONFIG_JSON must be a JSON object.")
+          if os.environ.get("LAB_LOCATION_OVERRIDE"):
+              config["location"] = os.environ["LAB_LOCATION_OVERRIDE"]
           for field in ("subscriptionId", "tenantId", "resourceGroup", "location",
                         "namePrefix", "alertEmail", "vmAdminPassword", "grafanaAdminObjectId"):
               if not isinstance(config.get(field), str) or not config[field] or "<" in config[field]:
@@ -107,15 +122,33 @@ jobs:
           az account set --subscription "$AZURE_SUBSCRIPTION_ID"
           az bicep install --version v0.37.4
       - name: Build frontend
+        if: ${{ !inputs.check_only }}
         working-directory: workloads/webapp
         run: npm ci && npm run build
       - name: Install Kubernetes clients
+        if: ${{ !inputs.check_only }}
         shell: bash
         run: |
           az aks install-cli --install-location "$RUNNER_TEMP/bin/kubectl" \
             --kubelogin-install-location "$RUNNER_TEMP/bin/kubelogin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Check regional availability and quota without deployment
+        if: inputs.check_only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = Get-Content lab.config.json -Raw | ConvertFrom-Json
+          $nodeCount = if ($null -eq $config.aksNodeCount) { 2 } else { [int]$config.aksNodeCount }
+          $linux = if ($null -eq $config.deployLinuxVm) { $true } else { [bool]$config.deployLinuxVm }
+          $windows = if ($null -eq $config.deployWindowsVm) { $true } else { [bool]$config.deployWindowsVm }
+          $agent = [bool]$config.stageToggles.enableStageObservabilityAgent
+          $agentLocation = if ($config.observabilityAgentLocation) { $config.observabilityAgentLocation } else { 'westeurope' }
+          ./scripts/preflight-check.ps1 -Location $config.location -AksNodeCount $nodeCount `
+            -DeployLinuxVm $linux -DeployWindowsVm $windows -ResourceGroup $config.resourceGroup `
+            -DeployObservabilityAgent $agent -ObservabilityAgentLocation $agentLocation
+          "Read-only preflight passed in $($config.location). No resource deployment was performed." >> $env:GITHUB_STEP_SUMMARY
       - name: Deploy and complete the existing lab
+        if: ${{ !inputs.check_only }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -123,6 +156,7 @@ jobs:
           $operators = @($config.consoleOperatorObjectIds | ForEach-Object { [guid]$_ })
           ./scripts/deploy.ps1 -ConsoleOperatorObjectIds $operators
       - name: Deploy orders SLO alert
+        if: ${{ !inputs.check_only }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
