@@ -27,9 +27,7 @@ public sealed class PortalApiTests
             var settings = new Dictionary<string, string?>(PortalHarness.Settings)
             {
                 ["LabConsole:Mission:Enabled"] = enabled.ToString(),
-                ["LabConsole:Mission:LedgerKey"] = ledgerConfigured ? "ledger-test-key" : "",
-                ["ApplicationInsights:ConnectionString"] =
-                    "InstrumentationKey=00000000-0000-0000-0000-000000000001"
+                ["LabConsole:Mission:LedgerKey"] = ledgerConfigured ? "ledger-test-key" : ""
             };
             builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(settings));
             builder.ConfigureServices(services =>

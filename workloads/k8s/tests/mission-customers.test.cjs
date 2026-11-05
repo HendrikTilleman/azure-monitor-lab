@@ -60,7 +60,7 @@ test('requests use matching catalog SKUs, key, channel mix and keep going after 
 
 test('runtime configuration is validated before emitting load', () => {
   for (const env of [{ PORTAL_URL: '__PORTAL_URL__' }, { CUSTOMER_KEY: '' },
-    { PORTAL_URL: 'https://portal.example?key=secret' }, { PORTAL_URL: 'https://user@portal.example' },
+    { PORTAL_URL: 'https://portal.example?key=secret' }, { PORTAL_URL: 'https://user@example.com' },
     { ORDERS_PER_MINUTE: '0' }, { BROWSES_PER_MINUTE: '601' }, { DURATION: '101m' }]) {
     assert.throws(() => run(env));
   }
