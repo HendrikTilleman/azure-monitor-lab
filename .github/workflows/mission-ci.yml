@@ -29,6 +29,11 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: Test embedded ledger workloads (Python standard library)
+        run: |
+          docker run --rm \
+            -v "$PWD/workloads/k8s:/workloads:ro" \
+            python:3.11-slim python -B -m unittest discover -s /workloads/tests -v
       - name: Run mission Node tests when present
         working-directory: workloads/webapp
         run: |

@@ -15,6 +15,8 @@ It's built for demos, microhacks, and hackathons. Deploy it, poke around, break 
 
 The planned **The Bridge Call That Never Happened** scenario extends the existing lab with a live Azure SRE Agent investigation. See [DESIGN.md](DESIGN.md) for the specification and incremental work items. Mission Control is not installed by the current lab deployment.
 
+The opt-in core ledger and report workloads, direct-ledger load test and AKS checks are documented in the [Mission Control guide](docs/SRE-MISSION-CONTROL.md).
+
 ## Use The Lab
 
 | Experience | Start here |
