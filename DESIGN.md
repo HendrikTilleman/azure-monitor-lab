@@ -2,7 +2,7 @@
 
 **SRE Mission Control: a live Azure SRE Agent demo built on azure-monitor-lab**
 
-Design v1.2 · 5 November 2026 · Owner: Hendrik Tilleman
+Design v2.0 · 5 November 2026 · Scenario: the batch job in business hours · Owner: Hendrik Tilleman
 
 > This file is the complete build specification. This repository is a fork of [Azure-Samples/azure-monitor-lab](https://github.com/Azure-Samples/azure-monitor-lab); this file and the `design/` folder with screen previews sit at its root. GitHub Copilot builds everything else, one work item at a time (section 12).
 
@@ -12,7 +12,7 @@ Design v1.2 · 5 November 2026 · Owner: Hendrik Tilleman
 - [1. Rules for GitHub Copilot](#1-rules-for-github-copilot)
 - [2. The big idea](#2-the-big-idea)
 - [3. The mic-drop moment](#3-the-mic-drop-moment)
-- [4. Incident design: the rightsizing release](#4-incident-design-the-rightsizing-release)
+- [4. Incident design: the batch job in business hours](#4-incident-design-the-batch-job-in-business-hours)
 - [5. Storyboard (18 minutes)](#5-storyboard-18-minutes)
 - [6. SRE Mission Control experience](#6-sre-mission-control-experience)
 - [7. Architecture](#7-architecture)
@@ -26,7 +26,7 @@ Design v1.2 · 5 November 2026 · Owner: Hendrik Tilleman
 - [15. Critical review](#15-critical-review)
 - [16. Risks and validation items](#16-risks-and-validation-items)
 - [Appendix A. Agent reporting format](#appendix-a-agent-reporting-format)
-- [Appendix B. Release 2.4.0 versus 2.4.1](#appendix-b-release-240-versus-241)
+- [Appendix B. The schedule change](#appendix-b-the-schedule-change)
 - [Appendix C. Glossary](#appendix-c-glossary)
 
 ## 0. How to use this document
@@ -40,7 +40,7 @@ Design v1.2 · 5 November 2026 · Owner: Hendrik Tilleman
 3. Sections 2 to 7 explain the experience and the reasons behind it. Section 9 is the implementation specification. Section 10 is how the demo is run, which the code must support.
 4. The base code is this repository, a fork of [Azure-Samples/azure-monitor-lab](https://github.com/Azure-Samples/azure-monitor-lab) (MIT licence). All new code is written here; do not copy code from anywhere else. Keep changes upstream-friendly so the scenario can be proposed back to the lab later.
 5. Facts about the lab were checked against its `main` branch in late October 2026. Where the code in this repository differs from this document (names, paths, APIs), follow the code, keep the intent, and list the difference in the pull request description.
-6. You cannot reach the owner's Azure subscription. For every check that needs Azure, write the exact verification commands in the pull request description under **Owner to verify**.
+6. In the cloud you cannot reach the owner's Azure subscription: for every check that needs Azure, write the exact verification commands in the pull request description under **Owner to verify**. In a local session where the owner has signed in to Azure, you may run read-only checks, only in the lab resource group and the Kubernetes namespace `demo`; ask before any change, and never change the Azure SRE Agent or its response plans.
 7. Azure SRE Agent facts come from the Microsoft Learn documentation reviewed for this design. Several of its APIs are preview: wrap them, pin their versions and degrade gracefully when they change.
 
 ## 1. Rules for GitHub Copilot
@@ -52,9 +52,9 @@ Work item 0 copies the block below into `.github/copilot-instructions.md`. If th
 The full specification is DESIGN.md at the repository root. Read the relevant sections before changing anything.
 
 Honesty (never break these)
-- Every number, alert, agent message and timestamp on the Mission Control screen comes from a live source: the storefront pulse, Azure Monitor alerts, Container insights, Application Insights availability results, the Azure SRE Agent thread or the agent's audit log.
+- Every number, alert, agent message and timestamp on the Mission Control screen comes from a live source: the portal pulse, Azure Monitor alerts, Container insights, Application Insights availability results, the Azure SRE Agent thread or the agent's audit log.
 - Never invent, interpolate, hard-code or smooth agent output, root causes or metrics. A missing value is shown as "not measured".
-- Every fallback is labelled on screen: "RECORDED RUN · not live", "Agent paged manually", "Rolled back by runbook · not the agent", and "Simulated data" for the local design harness.
+- Every fallback is labelled on screen: "RECORDED RUN · not live", "Agent paged manually", "Paused by runbook · not the agent", and "Simulated data" for the local design harness.
 - No typing animations, fake progress bars or spinners that suggest agent activity without data behind it.
 - Agent actions are approved only in the Azure SRE Agent portal. Mission Control shows the approval status; it never approves.
 - The agent instructions and the knowledge file never contain hints about the injected fault.
@@ -66,31 +66,48 @@ Scope and reuse
 
 Engineering
 - One work item per pull request. Small, reviewable changes. Describe what you verified and what the owner must verify in Azure.
-- /api/mission/* uses the same operator allowlist, same-origin check and request header as /api/operations. /api/shop/* allows anonymous calls but requires the lab customer key header and has its own rate limit.
+- /api/mission/* uses the same operator allowlist, same-origin check and request header as /api/operations. /api/portal/* allows anonymous calls but requires the lab customer key header and has its own rate limit.
 - PowerShell 7 scripts are idempotent, safe to run twice, and only touch the lab resource group and the Kubernetes namespace demo. Never delete Azure resources.
 - No secrets in the repository. Secrets live in App Service settings and Kubernetes secrets created by the setup script.
-- Tests: node --test for the screen's view-model, unit tests for the phase and mark logic, a smoke test for the shop API.
+- Tests: node --test for the screen's view-model, unit tests for the phase and mark logic, a smoke test for the portal API.
 - Keep docs/SRE-MISSION-CONTROL.md up to date with every behaviour change.
 ```
 
 ## 2. The big idea
 
-Every enterprise has lived this hour: a harmless-looking change ships, customers start failing, a dozen alerts fire across three teams and a bridge call fills up with people staring at different dashboards. *The Bridge Call That Never Happened* puts that hour on stage, live, on azure-monitor-lab. The audience first watches the checkout of Tailwind Traders (a fictional online store) running healthy and boring on a big-screen control room called **SRE Mission Control**. Then, without warning or explanation, checkout success starts to fall while the uptime test stays green. Alerts arrive from the storefront, Application Insights and AKS, each telling a different partial story. Azure SRE Agent picks up the incident by itself, forms hypotheses, queries the real telemetry, rules things out and lands on a cause nobody on stage mentioned: a cost-saving release that cut a memory limit. It proposes a rollback and waits; a human approves it, and the room watches real checkout traffic recover before the agent verifies the fix with its own evidence. The last screen shows the measured timeline of the incident: the bridge call that never needed to happen.
+Every enterprise has lived this hour: a harmless-looking change ships, customers start failing, a dozen alerts fire across three teams and a bridge call fills up with people staring at different dashboards. *The Bridge Call That Never Happened* puts that hour on stage, live, on azure-monitor-lab. The audience first watches the customer order flow of Contoso (a fictional company) running healthy and boring on a big-screen control room called **SRE Mission Control**. Then, without warning or explanation, orders start slowing down and failing while the uptime test stays green, and nobody has touched the order service. Alerts arrive from the portal, Application Insights and the AKS cluster, each telling a different partial story; a cluster CPU alert even invites the classic wrong fix: "scale it out". Azure SRE Agent picks up the incident by itself, forms hypotheses, queries the real telemetry, rules things out and lands on a cause nobody on stage mentioned: a change moved the heavy month-end report from 02:00 into business hours, and it is starving the shared core ledger that every customer order needs. It proposes pausing the job and waits; a human approves it, and the room watches real orders recover before the agent verifies the fix with its own evidence. The last screen shows the measured timeline of the incident: the bridge call that never needed to happen.
+
+### 2.1 Why this story works for every audience
+
+Every organisation runs a live service that customers or employees use during the day, and a heavy scheduled job that must finish on time, on the same core system. Banks run end-of-day batches next to online banking, payroll providers run payroll next to their employee portal, telcos run billing next to self-care, manufacturers run planning next to order intake. Everyone has seen a batch job hurt the live service, and everyone knows how hard it is to spot, because the symptom shows up on a service nobody changed.
+
+The incident mechanics never change. Only the words on the screen do, through three settings (9.7) and one optional Setup parameter (9.5):
+
+| Audience | Live service (`Noun`) | Scheduled job (`BatchLabel`, `-BatchName`) |
+|---|---|---|
+| Default, retail and manufacturing | orders | Month-end report (`month-end-report`) |
+| Banking | transfers | End-of-day batch (`end-of-day-batch`) |
+| Payroll and HR services | payslips | Payroll run (`payroll-run`) |
+| Telecommunications | orders | Billing run (`billing-run`) |
+| Market infrastructure | settlement instructions | Settlement cycle (`settlement-cycle`) |
+| Life sciences | orders | Data onboarding pipeline (`data-onboarding`) |
+
+Do not put real customer names in this repository. Use the presets above, or the brand setting at show time.
 
 ## 3. The mic-drop moment
 
-The 45 seconds that should make the room go quiet start when the agent writes its root cause and end when customers are paying again. Nothing in this sequence is animated without data behind it.
+The 45 seconds that should make the room go quiet start when the agent writes its root cause and end when customers are ordering again. Nothing in this sequence is animated without data behind it.
 
 | Seconds | On screen | Presenter |
 |---|---|---|
 | 0–10 | The status pill turns violet: *Root cause identified*. The agent's own root-cause sentence fills the centre, with its confidence and the change it found. | Silent. Let the room read it. |
-| 10–20 | The alert rail re-sorts: each alert is tagged SYMPTOM or UNRELATED by the agent and the row collapses into "6 alerts · 1 root cause". On the timeline a violet marker drops in before the first red dot: *Change reached production*. | "It happened before anyone noticed. Nobody on this stage told it about that release." |
+| 10–20 | A node the audience never saw at the start, *Month-end report*, is tagged ROOT CAUSE on the map; the portal and the core ledger are tagged SYMPTOM. The alert rail re-sorts by the agent's verdicts and collapses into "5 alerts · 1 root cause". On the timeline a violet marker drops in before the first red dot: *Schedule change*. | "Nobody touched the order service. Someone moved a report. Nobody on this stage told it that." |
 | 20–35 | The proposed action appears with a pulsing gate: *Waiting for a human*. The presenter switches to the Azure SRE Agent tab, reads the command aloud and approves it. | "It does not get to change production on its own. I do, with my identity, and it is audited." |
-| 35–60 | Back on Mission Control the restarts stop, the checkout line climbs back to 99% and the pill turns green: *Recovered · verifying*. Minutes later the agent posts VERIFIED with its own queries. | "Those are customers paying again. That bridge call never happened." |
+| 35–60 | Back on Mission Control the ledger queue drains, the order success line climbs back to 99% and the pill turns green: *Recovered · verifying*. Minutes later the agent posts VERIFIED with its own queries. | "Those are customers ordering again. That bridge call never happened." |
 
-Why experienced SREs will respect it: the cause is a change rather than a crash, the agent separates symptoms from cause (including an unrelated VM CPU alert), the approval is a real on-behalf-of approval in the product, and recovery is measured from customer traffic rather than a status flag.
+Why experienced SREs will respect it: the failing service is not the changed one (a noisy neighbour on a shared dependency); the agent rejects the tempting fix (scaling out) with evidence; it separates symptoms from cause, including an alert that points the wrong way; the approval is a real on-behalf-of approval in the product; and recovery is measured from customer traffic rather than a status flag.
 
-## 4. Incident design: the rightsizing release
+## 4. Incident design: the batch job in business hours
 
 ### 4.1 Why this incident
 
@@ -99,56 +116,58 @@ Why experienced SREs will respect it: the cause is a change rather than a crash,
 | break-the-lab (VMs deallocated, crash-looping pod, 80% `/api/explode`, annotation) | Exists | Too obvious and multi-cause; the annotation names the culprit. Reuse its mechanics, not its story. |
 | CPU stress on the VMs (`simulate-high-cpu`) | Exists | No customer impact. Kept as optional unrelated noise that the agent should dismiss. |
 | Error ramp (`loadgen-ramp`, `/api/explode`) | Exists | Synthetic errors on an endpoint called "explode" read as fake to SREs. |
-| App Service configuration drift | New | Good second scenario (P1), but one Activity Log entry gives it away too quickly. |
-| **FinOps rightsizing release: memory limit 256Mi to 128Mi, OOMKilled under load, CrashLoopBackOff** | New (small) | **Chosen.** A real change through Kubernetes, worsening symptoms, evidence across four sources, change correlation and a safe rollback. |
+| Memory-limit release (a cost-saving release cuts a memory limit, pods are OOMKilled) | New (small) | Strong for SRE audiences, but "a pod ran out of memory" is a Kubernetes story that business audiences do not recognise. Second scenario (P1). |
+| App Service configuration drift | New | Good later scenario (P1), but one Activity Log entry gives it away too quickly. |
+| **A schedule change moves a heavy batch job into business hours; it saturates the shared core ledger and customer orders queue and time out** | New (small) | **Chosen.** Recognisable in every industry, the failing service is not the changed one, there is a tempting wrong fix, evidence across four sources, change correlation and a safe, reversible action. |
 
 ### 4.2 Incident card
 
 | Aspect | Design |
 |---|---|
-| Initial trigger | One action: the Mission Control fuse (or the `mission-inject` lab operation) patches deployment `payments-api` to release 2.4.1: version label 2.4.1, memory request 96Mi, limit 128Mi, change-cause "Release 2.4.1 - rightsizing FIN-2291". Rolling update with maxUnavailable 0, plus a normal release annotation, exactly as a pipeline would write it. |
-| Customer symptoms | Checkout success starts falling about a minute after the release and keeps getting worse as Kubernetes back-off grows. Checkout p95 rises sharply as retries and timeouts pile up. Orders and sales per minute drop. Browsing is unaffected. The external uptime test (5 locations on "/") stays green. |
-| Telemetry generated | Application Insights: storefront requests (`POST /api/shop/checkout` returning 502), dependency calls to payments (timeouts, connection refused or reset), `ShopCheckout` events and the `shop.checkout.failed` metric. Container insights: KubePodInventory (last state OOMKilled, restart counts, version label, new ReplicaSet), container memory working set at the limit, ContainerLogV2 start-up line showing the 128 MiB limit, KubeEvents back-off warnings. Platform metrics: App Service Http5xx and response time. |
-| Alerts (expected order) | 1. `alert-checkout-slo-burn` (new, Sev 1). 2. `alert-webapp-5xx` (exists). 3. `alert-appinsights-failed-requests` (exists). 4. `amba-webapp-response-time` (exists). 5. `alert-aks-pod-restart-spike` (exists). 6. Optional noise: `alert-vm-cpu-high` (exists). The availability test stays green. |
-| Dependencies | Synthetic customers (k6 job on AKS) call the storefront API on App Service; the storefront calls payments-api on AKS through a LoadBalancer restricted to the web app's outbound IPs (2.5 s timeout, one retry). Telemetry flows to Application Insights and Log Analytics; Azure SRE Agent reads both. |
-| Expected investigation path | Quantify impact from requests and dependencies. Hypothesis 1, storefront saturation: ruled out (CPU and memory normal, failures only on payment calls). Hypothesis 2, network or load balancer: ruled out (probes and browsing fine, resets line up with restarts). Hypothesis 3, payments pods restarting on a resource limit: validated (OOMKilled, exit 137, only on the new ReplicaSet). Correlate with the release, classify every alert, state root cause and confidence, propose rollback. The path is not scripted: the agent gets no hint, only a reporting format. |
-| Root cause | Release 2.4.1 lowered the payments-api memory limit to 128Mi. Under checkout load the working set exceeds it, the container is OOM-killed, pods crash-loop and checkouts time out. |
-| Remediation | The agent proposes `kubectl rollout undo deployment/payments-api -n demo` (through `az aks command invoke`) and requests approval; the presenter approves in the Azure SRE Agent portal. Fallback: the `mission-restore` runbook, labelled on screen. |
-| Recovery evidence | The storefront sees payments version 2.4.0 again (fix live), checkout success stays at or above 99% for 45 s (recovered), restarts stop, alerts auto-resolve, the agent writes VERIFIED after its own three-minute check, and the debrief shows the measured timeline. |
+| Initial trigger | One action: the Mission Control fuse (or the `mission-inject` lab operation) patches CronJob `month-end-report` the way a configuration pipeline would: the schedule moves from `0 2 * * *` (02:00) to the next whole minute in the cluster's configured time zone, with the change-cause annotation "FIN-2291: run month-end report in business hours for the finance cut-off". The CronJob controller starts the job at that minute, so the impact begins up to about a minute after the inject. |
+| Customer symptoms | Placing an order slows down, then starts failing as the report adds workers; the failure rate keeps climbing for about three minutes. Order p95 rises from about 0.2 s to the 3 s timeout. Orders and sales per minute drop. Browsing the portal is unaffected (it is served from cache). The external uptime test (5 locations on "/") stays green. |
+| Telemetry generated | Application Insights: portal requests (`POST /api/portal/orders` returning 504), dependency calls to the core ledger with growing duration and timeouts, `PortalOrder` events and the `portal.order.failed` metric. Container insights: ContainerLogV2 lines from the core ledger (per request: client, operation, queue wait, service time; every 15 s: busy workers, queue depth, busy share per client) and from the report job (start line with schedule and trigger); KubePodInventory with new `month-end-report-…` pods owned by a Job, started just before the impact; node and container CPU from the report pods. Platform metrics: App Service Http5xx and response time. |
+| Alerts (expected order) | 1. `alert-orders-slo-burn` (new, Sev 1). 2. `alert-webapp-5xx` (exists). 3. `alert-appinsights-failed-requests` (exists). 4. `amba-webapp-response-time` (exists). 5. `alert-aks-node-cpu-high` (exists; fires if the report pods push node CPU over its threshold, which depends on the node size: confirm in gate A). 6. Optional noise: `alert-vm-cpu-high` (exists). The availability test stays green. No pod restarts: nothing is crashing. |
+| Dependencies | Synthetic customers (k6 job on AKS) call the portal API on App Service. The portal calls the core ledger on AKS through a LoadBalancer restricted to the web app's outbound IPs (3 s timeout, one retry on connection errors only). The month-end report (CronJob on AKS) calls the same core ledger inside the cluster. The core ledger has a fixed pool of workers per pod, shared by every client: the realistic weak point. Telemetry flows to Application Insights and Log Analytics; Azure SRE Agent reads both. |
+| Expected investigation path | Quantify impact from requests and dependencies. Hypothesis 1, portal saturation: ruled out (CPU and memory normal, failures only on ledger calls). Hypothesis 2, network or load balancer: ruled out (calls connect and complete, just late; no resets). Hypothesis 3, cluster capacity, prompted by the node CPU alert: ruled out (the ledger pods use little CPU, no throttling or restarts; the time is spent waiting in the ledger's queue, so scaling nodes would not help). Hypothesis 4, contention on the core ledger from another client: validated (workers fully busy, queue wait in seconds, most busy time taken by the `month-end-report` client, whose pods started minutes before the impact). Correlate with the schedule change (annotation and the job's own start line: triggered by its schedule at a business-hours time, normally 02:00), classify every alert, state root cause and confidence, propose the smallest reversible action. The path is not scripted: the agent gets no hint, only a reporting format. |
+| Root cause | A schedule change moved the month-end report from 02:00 into business hours. Its parallel statement queries hold the core ledger's shared workers for seconds each, so customer orders wait in the ledger's queue past the portal's timeout. |
+| Remediation | The agent proposes to suspend the CronJob and the running Job (`kubectl patch cronjob month-end-report -n demo -p '{"spec":{"suspend":true}}'` and the same patch on the active Job, through `az aks command invoke`) and requests approval; the presenter approves in the Azure SRE Agent portal. Suspending is reversible and deletes nothing. The agent's LEARNING lines should cover the durable fixes: move the schedule back, give batch clients their own capacity or a rate limit, and alert on ledger queue wait. Fallback: the `mission-restore` runbook, labelled on screen. |
+| Recovery evidence | The portal sees no batch work on the ledger for 30 s (fix live), order success stays at or above 99% for 45 s (recovered), queue wait returns to milliseconds, alerts auto-resolve, the agent writes VERIFIED after its own three-minute check, and the debrief shows the measured timeline. |
 
 ### 4.3 Guardrails for the incident
 
-- **Worsening, not binary.** CrashLoopBackOff back-off makes failures ramp over minutes, which builds tension and avoids an instant red screen.
-- **No breadcrumbs.** The agent instructions define only a reporting format and safety rules; the knowledge file describes topology, SLOs and owners, never the fault.
-- **Safe blast radius.** Only namespace `demo` and only `payments-api`; rollback is a standard kubectl operation and Baseline converges to 2.4.0 from any state.
-- **Deterministic enough.** The memory limit is exceeded reliably at a constant arrival rate. The variance comes from alert evaluation and the agent, and the storyboard absorbs it.
+- **Worsening, not binary.** The report ramps its parallel workers over about three minutes, so orders slow down before they fail. That builds tension and avoids an instant red screen.
+- **No breadcrumbs.** The agent instructions define only a reporting format and safety rules; the knowledge file describes topology, SLOs and owners, never the fault. The report job is listed in the knowledge file as a normal nightly consumer of the ledger, exactly as a real service catalogue would list it.
+- **Safe blast radius.** Only namespace `demo`, only the CronJob `month-end-report` and its Jobs. The fix is a suspend; Baseline converges to the nightly schedule from any state.
+- **Deterministic enough.** The ledger's worker pool is fixed and the report's concurrency is fixed, so the contention does not depend on node size or cluster load. The variance comes from the cron start minute, alert evaluation and the agent, and the storyboard absorbs it.
+- **Honest naming.** The change is a real Kubernetes change to a real workload; the change-cause annotation is the kind of note a pipeline writes. The lab's release annotation records it in Application Insights like any other change.
 
 ## 5. Storyboard (18 minutes)
 
 Times are design targets. On the day every timestamp on screen is measured, never typed in.
 
 #### Act 1: Normal (0:00–2:00)
-- **Audience sees:** green pill "All systems operational", about 99.6% checkout success, live flow Customers → Storefront → Payments, 0 alerts, agent standing by.
-- **Presenter says:** "This is Tailwind Traders' checkout on Azure. Everything you will see is live. I am not going to tell you what happens next."
+- **Audience sees:** green pill "All systems operational", about 99.6% order success, live flow Customers → Portal → Core ledger, 0 alerts, agent standing by.
+- **Presenter says:** "This is Contoso's order flow on Azure. Everything you will see is live. I am not going to tell you what happens next."
 - **Technically:** the customers job has run for at least 10 minutes; the fuse was armed before going on stage.
-- **Azure SRE Agent:** idle. Response plan `mission-checkout` listens to Azure Monitor alerts.
+- **Azure SRE Agent:** idle. Response plan `mission-orders` listens to Azure Monitor alerts.
 - **Expected:** a calm baseline that earns credibility.
 - **If it fails:** no traffic: run Baseline from the drawer and use the two minutes for the architecture.
 
 #### Act 2: Something is wrong (2:00–4:00)
-- **Audience sees:** checkout success starts sliding, with plain words such as "1 in 4 checkouts failing"; p95 rises; overlay "Checkout is failing". The uptime test is still 5/5 green.
-- **Presenter says:** "Look at what the board says: uptime is green. Customers cannot pay."
-- **Technically:** the fuse fires `mission-inject`: release 2.4.1 rolls out and the new pods run out of memory under load.
+- **Audience sees:** order p95 climbs, then order success starts sliding, with plain words such as "1 in 4 orders failing"; overlay "Orders are failing". The uptime test is still 5/5 green and browsing is fine.
+- **Presenter says:** "Look at what the board says: uptime is green, the portal is up. Customers cannot place an order. And nobody changed the order service today."
+- **Technically:** the fuse fires `mission-inject`; at the next whole minute the CronJob starts the report, which ramps its workers and fills the ledger's queue.
 - **Azure SRE Agent:** nothing yet; no alert has fired.
 - **Expected:** tension: impact without a cause.
 - **If it fails:** runner slow: press "Inject now" and keep narrating the business view.
 
 #### Act 3: Signal explosion (4:00–6:00)
-- **Audience sees:** alerts land one by one: SLO burn (Sev 1), 5xx, failed requests, response time, pod restarts, VM CPU. Pill "Incident · Sev 1". Optional 20-second cut to the Azure Portal alerts view.
-- **Presenter says:** "Normally the bridge call starts now: storefront, platform, payments. Each team has its own dashboard and its own theory."
+- **Audience sees:** alerts land one by one: SLO burn (Sev 1), 5xx, failed requests, response time, AKS node CPU, VM CPU. Pill "Incident · Sev 1". Optional 20-second cut to the Azure Portal alerts view.
+- **Presenter says:** "Normally the bridge call starts now: the portal team, the platform team, the ledger team. The platform alert says CPU: someone will say 'scale out'. Each team has its own dashboard and its own theory."
 - **Technically:** Azure Monitor evaluates every minute, plus processing delay.
 - **Azure SRE Agent:** picks up the Sev 1 alert that matches the response plan and opens an incident thread.
-- **Expected:** a visible storm of partial stories.
+- **Expected:** a visible storm of partial stories, one of them pointing the wrong way.
 - **If it fails:** no thread 2 minutes after the alert: "Page the agent" (the screen shows "Agent paged manually").
 
 #### Act 4: The agent takes over (6:00–8:30)
@@ -160,45 +179,45 @@ Times are design targets. On the day every timestamp on screen is measured, neve
 - **If it fails:** slow: narrate the query trail and open the thread side by side. No output after 6 minutes: play the recorded run (amber "RECORDED RUN · not live").
 
 #### Act 5: Follow the evidence (8:30–11:00)
-- **Audience sees:** hypothesis rows: storefront ruled out, network ruled out, payments testing. "Agent queried" chips by source; the scan ring moves from Storefront to Payments.
-- **Presenter says:** "Watch what it rules out. That is the hour a bridge call burns."
+- **Audience sees:** hypothesis rows: portal ruled out, network ruled out, cluster capacity ruled out ("scaling would not help"), ledger contention testing. "Agent queried" chips by source; the scan ring moves from Portal to Core ledger. From this phase on, the map shows the ledger's queue and a fourth node, *Month-end report*, attached to the ledger.
+- **Presenter says:** "Watch what it rules out, including the fix half the bridge call would have asked for. That is the hour a bridge call burns."
 - **Technically:** the query trail comes from the agent's audit log, about 1 minute behind, and is labelled as such.
-- **Azure SRE Agent:** queries pod inventory, events, logs, memory and rollout history; validates hypothesis 3.
+- **Azure SRE Agent:** queries dependency durations, ledger logs, pod inventory and CPU; validates hypothesis 4 and looks for what changed.
 - **Expected:** the search space visibly narrows.
 - **If it fails:** the agent ignores the format: the screen shows its latest text verbatim; read along in the portal.
 
 #### Act 6: Root cause (11:00–12:30)
-- **Audience sees:** the root-cause card in the agent's words, its confidence and the change; alerts collapse to "6 alerts · 1 root cause"; the change marker drops onto the timeline before the impact.
-- **Presenter says:** silence. Then: "A cost-saving release, minutes before anyone noticed."
+- **Audience sees:** the root-cause card in the agent's words, its confidence and the change; the report node tagged ROOT CAUSE; alerts collapse to "5 alerts · 1 root cause"; the schedule-change marker drops onto the timeline before the impact.
+- **Presenter says:** silence. Then: "A report that should run at two in the morning. Moved by one line of configuration."
 - **Technically:** the phase changes on the first ROOT CAUSE line.
 - **Azure SRE Agent:** writes root cause, confidence, alert verdicts and the proposed action.
 - **Expected:** the room goes quiet.
-- **If it fails:** the agent stops at a symptom: type a follow-up in the thread, visibly: "What changed before the restarts started?"
+- **If it fails:** the agent stops at a symptom ("the ledger is slow"): type a follow-up in the thread, visibly: "Which client is using the ledger, and what changed before the impact started?"
 
 #### Act 7: Recovery (12:30–14:30)
 - **Audience sees:** gate "Waiting for a human"; the presenter approves in the SRE Agent portal; the gate turns "Approved by a human"; then "Fix live hh:mm:ss".
-- **Presenter says:** "It proposes, I approve. Review mode, my identity, fully audited."
-- **Technically:** on-behalf-of approval, then `az aks command invoke` runs the rollback (duration measured in rehearsal).
-- **Azure SRE Agent:** executes the approved action and checks the rollout.
+- **Presenter says:** "It proposes, I approve. It pauses the report; it does not delete anything. Review mode, my identity, fully audited."
+- **Technically:** on-behalf-of approval, then `az aks command invoke` suspends the CronJob and the running Job (duration measured in rehearsal).
+- **Azure SRE Agent:** executes the approved action and checks that the report pods are gone.
 - **Expected:** the fix reaches production.
-- **If it fails:** approval fails or takes over 2 minutes: "Roll back via runbook" (screen: "Rolled back by runbook · not the agent").
+- **If it fails:** approval fails or takes over 2 minutes: "Pause via runbook" (screen: "Paused by runbook · not the agent").
 
 #### Act 8: Proof (14:30–16:30)
-- **Audience sees:** the recovery view: the success line climbs back to 99% with Impact, Fix live and Recovered markers; alerts resolve; the VERIFIED box shows the agent's words.
-- **Presenter says:** "Not a status flag: customers paying again."
+- **Audience sees:** the recovery view: the success line climbs back to 99% with Impact, Fix live and Recovered markers; queue wait back to milliseconds; alerts resolve; the VERIFIED box shows the agent's words and its LEARNING lines.
+- **Presenter says:** "Not a status flag: customers ordering again. And it tells us what to change so it does not happen at month-end next time."
 - **Technically:** Recovered after 45 seconds at 99% or better; alerts auto-mitigate.
-- **Azure SRE Agent:** re-queries the original signals for three minutes, writes VERIFIED and a LEARNING.
+- **Azure SRE Agent:** re-queries the original signals for three minutes, writes VERIFIED and LEARNING lines.
 - **Expected:** proof.
 - **If it fails:** no verification: ask "Verify the recovery with data" in the thread; the measured recovery is on screen anyway.
 
 #### Act 9: Mic drop (16:30–18:00)
-- **Audience sees:** the debrief: alert to root cause, impact to recovery, "6 → 1"; the measured steps; Traditional versus Agentic operations.
+- **Audience sees:** the debrief: alert to root cause, impact to recovery, "5 → 1"; the measured steps; Traditional versus Agentic operations.
 - **Presenter says:** the closing lines (section 11).
 - **Technically:** the presenter presses D.
 - **Expected:** "How do I deploy this?"
 - **If it fails:** a missing mark shows "not reached"; never fill it in by hand.
 
-**Timing reality.** Three intervals are outside the presenter's control: metric ingestion before the first alert, the agent's investigation time and the approval-plus-rollback round trip. Measure all three in the dress rehearsal and set the fallback triggers from those numbers. If the agent is faster than the plan, shorten the Act 5 narration; if it is slower, use the Act 4–5 contingencies. When verification runs long, open the debrief once customers have recovered and come back to the agent's VERIFIED line during questions.
+**Timing reality.** Four intervals are outside the presenter's control: the cron start (up to about a minute after the inject), metric ingestion before the first alert, the agent's investigation time and the approval-plus-action round trip. Measure them in the dress rehearsal and set the fallback triggers from those numbers. If the agent is faster than the plan, shorten the Act 5 narration; if it is slower, use the Act 4–5 contingencies. When verification runs long, open the debrief once customers have recovered and come back to the agent's VERIFIED line during questions.
 
 ## 6. SRE Mission Control experience
 
@@ -207,9 +226,9 @@ SRE Mission Control is a new big-screen mode of the existing Control Center (`/m
 ### 6.1 Principles
 
 - **One focus point per phase.** The centre stage changes with the incident; everything else recedes.
-- **Business first.** The left rail always speaks in customer terms ("1 in 2 checkouts failing"), never in pod names.
+- **Business first.** The left rail always speaks in customer terms ("1 in 2 orders failing"), never in pod names.
 - **Evidence over animation.** Every element is backed by a live source and shows its delay; a missing value reads "not measured", never a placeholder.
-- **Honest labels.** "Simulated data", "RECORDED RUN · not live", "Agent paged manually", "Rolled back by runbook · not the agent" and "audit log, about 1 min behind" are always shown when they apply.
+- **Honest labels.** "Simulated data", "RECORDED RUN · not live", "Agent paged manually", "Paused by runbook · not the agent" and "audit log, about 1 min behind" are always shown when they apply.
 - **Azure visual language in dark mode.** Near-black canvas, Azure blue for traffic, status colours only for status, violet only for the agent, Segoe UI. The headline figure is about 95 px tall on a 1080p screen so the back row can read it.
 - **Engineering controls are invisible.** A presenter drawer opens with Shift+P, or lives on a second screen with `?view=presenter`.
 
@@ -217,10 +236,10 @@ SRE Mission Control is a new big-screen mode of the existing Control Center (`/m
 
 ```text
 +--------------------------------------------------------------------------------+
-| [logo] Tailwind Traders          ( * status pill * )          LIVE   15:24:57  |
+| [logo] Contoso                   ( * status pill * )          LIVE   15:24:57  |
 +----------------+----------------------------------------------+----------------+
 | BUSINESS       | CENTRE STAGE (one focus per phase)           | SIGNALS        |
-| Checkout       |   map > investigation > root cause >         | Azure Monitor  |
+| Orders         |   map > investigation > root cause >         | Azure Monitor  |
 | success 99.6%  |   recovery > debrief                         | alerts (count) |
 | plain words    |                                              |  - alert rows  |
 | 10-min line    |                                              |                |
@@ -228,7 +247,7 @@ SRE Mission Control is a new big-screen mode of the existing Control Center (`/m
 | p95 · failed   |                                              | Agent card     |
 | sales / min    |                                              | (state, latest |
 | uptime test    |                                              |  finding,      |
-| last checkout  |                                              |  query trail)  |
+| last order     |                                              |  query trail)  |
 +----------------+----------------------------------------------+----------------+
 | INCIDENT TIMELINE   o impact  o first alert  o engaged  o root cause  ... | now |
 +--------------------------------------------------------------------------------+
@@ -237,10 +256,10 @@ SRE Mission Control is a new big-screen mode of the existing Control Center (`/m
 | Zone | Content | Source and refresh |
 |---|---|---|
 | Top bar | Brand, status pill (one per phase), freshness (Live, Reconnecting, Connection lost), clock. | Mission session phase, every 2 s. |
-| Left rail: business | Checkout success over the last minute, a plain-words line, a 10-minute line, orders per minute, checkout p95, failed per minute, sales per minute, uptime test, time of the last checkout. | Storefront pulse in the web app (real time); availability results (60 s). |
+| Left rail: business | Order success over the last minute, a plain-words line, a 10-minute line, orders per minute, order p95, failed per minute, sales per minute, uptime test, time of the last order. All nouns follow the `Noun` setting. | Portal pulse in the web app (real time); availability results (60 s). |
 | Centre stage | Service map, then investigation board, root cause, recovery and debrief. | Per phase; the presenter can override with keys 0–5 and D. |
 | Right rail: signals | Azure Monitor alerts (severity, title, resource, time, the agent's verdict) and the agent card (state, latest finding, last five queries). | Alerts API (15 s cache); agent thread (3 s); agent audit log (about 1 min). |
-| Bottom | Incident timeline with measured marks. The release marker appears only after the agent names the cause. | Session marks, every 2 s. |
+| Bottom | Incident timeline with measured marks. The schedule-change marker appears only after the agent names the cause. | Session marks, every 2 s. |
 
 ### 6.3 States and transitions
 
@@ -248,13 +267,13 @@ SRE Mission Control is a new big-screen mode of the existing Control Center (`/m
 |---|---|---|---|
 | standby | No mission session. | Standing by | Service map |
 | operational / armed | Session started; armed means the fuse is set and looks identical on screen. | All systems operational | Service map |
-| impact | Storefront checkout success below 97% over the last 20 s (at least 15 attempts). | Customer impact · checkout | Service map, nodes turn red; overlay |
+| impact | Portal order success below 97% over the last 20 s (at least 15 attempts). | Customer impact · orders | Service map, nodes turn red; overlay |
 | alerting | First Azure Monitor alert fired after the session start. | Incident · Sev 1 | Service map; the alert rail fills |
 | investigating | Agent thread created after the first alert (or paged by the presenter). | Incident · Azure SRE Agent investigating | Investigation board |
 | root-cause | First ROOT CAUSE line in the thread. | Root cause identified | Root-cause card, alert collapse |
 | awaiting-approval | Approval request in the thread. | Awaiting human approval | Root cause with pulsing gate |
-| mitigating | Approval granted, runbook started or new payments version observed. | Mitigating | Root cause, gate approved |
-| recovered | Checkout success at or above 99% for 45 s after the fix. | Recovered · verifying | Recovery chart |
+| mitigating | Approval granted, runbook started or batch work no longer observed. | Mitigating | Root cause, gate approved |
+| recovered | Order success at or above 99% for 45 s after the fix. | Recovered · verifying | Recovery chart |
 | verified | First VERIFIED line from the agent. | Resolved · verified | Recovery; D opens the debrief |
 | ended | Presenter ends the session. | Session ended | Service map |
 
@@ -262,11 +281,11 @@ The exact rules for each mark are in [9.7](#97-mission-control-backend).
 
 ### 6.4 Centre stages
 
-- **Service map.** Three nodes, Customers → Storefront → Payments, connected by flowing dots whose speed follows the request rate and whose colour follows the state (Azure blue healthy, amber degraded, red critical, grey unknown). Each node shows two live metrics: checkouts and page views per minute; storefront p95 and checkout error rate; payment success rate. Payments pod readiness and restarts appear only from the investigating phase onward (or in the presenter view), so the audience discovers the cause with the agent. After the root cause, Payments is tagged ROOT CAUSE and the other degraded nodes SYMPTOM.
+- **Service map.** Three nodes, Customers → Portal → Core ledger, connected by flowing dots whose speed follows the request rate and whose colour follows the state (Azure blue healthy, amber degraded, red critical, grey unknown). Each node shows two live metrics: orders and page views per minute; portal p95 and order error rate; ledger success rate and p95 queue wait. From the investigating phase onward (always in the presenter view) a fourth node appears below the ledger, labelled with `BatchLabel` (for example *Month-end report*), with its pod count and its share of the ledger's busy time; before that it is hidden, so the audience discovers the cause with the agent. After the root cause, the report node is tagged ROOT CAUSE and the degraded nodes SYMPTOM.
 - **Investigation board.** A small service map with a violet scan ring on the node the agent queried most recently (from its audit log, shown only if that query is under 150 s old). Below it, one row per hypothesis: number, statement, evidence and a chip (Testing, Confirmed, Ruled out, Inconclusive); show the newest five, always keeping the confirmed one. If the agent has not used the format yet, show its latest text verbatim with its timestamp. At the bottom, "Agent queried" chips count the agent's queries per data source.
-- **Root cause.** A card with the agent's root-cause sentence, its confidence, the change it found, "found m:ss after the first alert" and "n queries · m sources". Below it, the alert collapse: each fired alert as a pill with the agent's verdict, then "N alerts · 1 root cause". Then the proposed action with the approval gate: *Waiting for a human* (pulsing), *Approved by a human*, or *Rolled back by runbook · Presenter fallback · not the agent*.
-- **Recovery.** Three large numbers (checkout success, orders per minute, time the fix went live) above a 30-minute checkout success chart (0 to 100%) with Impact, Fix live and Recovered markers. When the agent writes VERIFIED, a green box shows its words with "Verified by Azure SRE Agent".
-- **Debrief.** Three headline numbers: alert to root cause, impact to recovery, and alerts fired against the single root cause (for example "6 → 1", shown only once the agent has stated a root cause). Then the measured steps (Change, Impact, First alert, Agent engaged, Root cause, Approved, Fix live, Recovered, Verified) with clock time and offset from the impact. Then two lanes: *Traditional incident: many dashboards → many signals → several people → long investigation* and *Agentic operations: incident → autonomous investigation → evidence → action → verification*.
+- **Root cause.** A card with the agent's root-cause sentence, its confidence, the change it found, "found m:ss after the first alert" and "n queries · m sources". Below it, the alert collapse: each fired alert as a pill with the agent's verdict, then "N alerts · 1 root cause". Then the proposed action with the approval gate: *Waiting for a human* (pulsing), *Approved by a human*, or *Paused by runbook · Presenter fallback · not the agent*.
+- **Recovery.** Three large numbers (order success, orders per minute, time the fix went live) above a 30-minute order success chart (0 to 100%) with Impact, Fix live and Recovered markers. When the agent writes VERIFIED, a green box shows its words with "Verified by Azure SRE Agent".
+- **Debrief.** Three headline numbers: alert to root cause, impact to recovery, and alerts fired against the single root cause (for example "5 → 1", shown only once the agent has stated a root cause). Then the measured steps (Batch observed, Impact, First alert, Agent engaged, Root cause, Approved, Fix live, Recovered, Verified) with clock time and offset from the impact. Then two lanes: *Traditional incident: many dashboards → many signals → several people → long investigation* and *Agentic operations: incident → autonomous investigation → evidence → action → verification*.
 
 ### 6.5 Moments
 
@@ -274,12 +293,12 @@ A centred overlay appears for about 5.5 seconds on each forward phase change, on
 
 | Phase reached | Kicker | Headline | Detail |
 |---|---|---|---|
-| impact | Customer impact | Checkout is failing | Plain words, for example "1 in 4 checkouts failing" |
+| impact | Customer impact | Orders are failing | Plain words, for example "1 in 4 orders failing" |
 | alerting | Azure Monitor | Incident · Sev n | Title of the first alert |
 | investigating | Azure SRE Agent | Investigation started | "Engaged automatically by the alert" or "Paged by the presenter" |
 | root-cause | Azure SRE Agent | Root cause identified | Confidence, if stated |
 | awaiting-approval | Human in the loop | Approval requested | "The agent proposes a fix and waits for a person" |
-| recovered | Customers | Checkout recovered | Current success rate |
+| recovered | Customers | Orders recovered | Current success rate |
 | verified | Azure SRE Agent | Recovery verified | – |
 
 ### 6.6 Visual language
@@ -300,39 +319,39 @@ A centred overlay appears for about 5.5 seconds on each forward phase change, on
 
 | Control | What it does | Visible to the audience |
 |---|---|---|
-| Start session | Typed resource group plus consent; runs Baseline (payments 2.4.0, default noisy traffic paused, customers started). Optional noise toggle. | No |
-| Fuse: 1, 2, 3 min or random 2–4 min | Server-side timer that injects the release; survives a page refresh. Disarm is available. | No |
-| Inject now | Immediate release 2.4.1. | No |
+| Start session | Typed resource group plus consent; runs Baseline (report back on its nightly schedule, default noisy traffic paused, customers started). Optional noise toggle. | No |
+| Fuse: 1, 2, 3 min or random 2–4 min | Server-side timer that injects the schedule change; survives a page refresh. Disarm is available. | No |
+| Inject now | Immediate schedule change (the report starts at the next whole minute). | No |
 | Page the agent | Creates an incident thread with an incident brief when the alert path is late. | Yes: "Agent paged manually" |
-| Roll back via runbook | `mission-restore` if the approval path fails. | Yes: "Rolled back by runbook · not the agent" |
+| Pause via runbook | `mission-restore` if the approval path fails. | Yes: "Paused by runbook · not the agent" |
 | Save this run / Play recording | Captures a real thread for later; replays it as a fallback. | Yes: amber "RECORDED RUN · not live" |
 | Stage keys | 0 auto, 1 map, 2 investigation, 3 root cause, 4 recovery, 5 or D debrief, F full screen, Esc close. | Only the stage change |
-| End session | Stops customers, restores payments, resumes default lab traffic. | Pill "Session ended" |
+| End session | Stops customers, puts the report back on its nightly schedule, resumes default lab traffic. | Pill "Session ended" |
 
 ### 6.8 Screen previews
 
-These previews show the target look. They come from a design harness fed with simulated, watermarked data; the agent text in them illustrates the reporting format and is not agent output. Build the screen from the specification in 6.1 to 6.7 and 9.8, using these as the visual reference.
+These previews show the target look. They come from a design harness fed with simulated, watermarked data; the agent text in them illustrates the reporting format and is not agent output. Build the screen from the specification in 6.1 to 6.7 and 9.8, using these as the visual reference. The nouns on screen follow the `Noun` and `BatchLabel` settings (2.1).
 
 ![Act 1: all systems operational](design/01-operational.png)
 *Act 1 · All systems operational: business rail, live service map, no alerts, agent standing by.*
 
 ![Act 2: customer impact](design/02-impact.png)
-*Act 2 · Customer impact: checkout success falling while the uptime test stays green; no alert has fired yet.*
+*Act 2 · Customer impact: success falling while the uptime test stays green; no alert has fired yet.*
 
 ![Act 3: first alerts](design/03-alerting.png)
 *Act 3 · Signal explosion: the first alerts land and the incident turns Sev 1.*
 
 ![Acts 4 and 5: investigation board](design/04-investigating.png)
-*Acts 4–5 · Investigation board: hypotheses ruled out and testing, sources the agent queried, its query trail.*
+*Acts 4–5 · Investigation board: hypotheses ruled out (including cluster capacity), the report node revealed next to the core ledger, sources the agent queried, its query trail.*
 
 ![Act 6: root cause](design/05-root-cause.png)
-*Act 6 · Root cause: the agent's finding, alert verdicts collapsing to one cause, the proposed action waiting for a human.*
+*Act 6 · Root cause: the agent's finding and the schedule change, alert verdicts collapsing to one cause, the proposed suspend waiting for a human.*
 
 ![Act 7: approved and mitigating](design/06-mitigating.png)
-*Act 7 · Approved by a human; the agent is executing the rollback.*
+*Act 7 · Approved by a human; the agent is executing the action.*
 
 ![Act 8: recovery](design/07-recovered.png)
-*Act 8 · Recovery measured from checkout traffic, with Impact, Fix live and Recovered markers.*
+*Act 8 · Recovery measured from customer traffic, with Impact, Fix live and Recovered markers.*
 
 ![Act 8: verified](design/08-verified.png)
 *Act 8 · Verified by the agent, in its own words.*
@@ -341,27 +360,27 @@ These previews show the target look. They come from a design harness fed with si
 *Act 9 · Debrief: measured durations, the incident steps and the operational comparison.*
 
 ![Presenter drawer](design/10-presenter.png)
-*Presenter drawer (Shift+P or `?view=presenter`): session, fuse, labelled fallbacks, stage override, end.*
+*Presenter drawer (Shift+P or `?view=presenter`): session, fuse, labelled fallbacks, stage override, end. The presenter view always shows the report node.*
 
 ## 7. Architecture
 
 ### 7.1 End-to-end flow
 
-1. Synthetic customers (k6 job on AKS, constant arrival rate, web, mobile and partner channels) call `POST /api/shop/checkout` on the Control Center App Service.
-2. The storefront API (inside the Control Center web app) calls payments-api on AKS with a 2.5 s timeout and one retry, records every checkout in an in-process pulse (1-second buckets, 30 minutes) and emits Application Insights telemetry: requests, dependencies, a `ShopCheckout` event and the `shop.checkout.failed` metric.
-3. Azure Monitor evaluates the existing lab alert rules and the new checkout SLO alert; Container insights sends pod inventory, events, logs and memory to Log Analytics; the availability test keeps probing "/".
-4. Azure SRE Agent: response plan `mission-checkout` (Sev 1, title contains "checkout", Review mode) opens a thread, runs a hypothesis-driven investigation over Application Insights, Log Analytics, metrics, alerts and the Azure CLI, proposes an action, waits for on-behalf-of approval, runs the rollback with `az aks command invoke` and verifies. Every tool call lands in its audit log in Application Insights.
-5. The Mission Control backend (`/api/mission/*`) combines the pulse, alerts, pod inventory, uptime, the agent thread and the audit log, derives phase and marks, and persists the session under `/home/data` so a restart does not lose the show.
+1. Synthetic customers (k6 job on AKS, constant arrival rate, web, mobile and partner channels) call `POST /api/portal/orders` on the Control Center App Service.
+2. The portal API (inside the Control Center web app) calls the core ledger on AKS with a 3 s timeout, records every order in an in-process pulse (1-second buckets, 30 minutes) and emits Application Insights telemetry: requests, dependencies, a `PortalOrder` event and the `portal.order.failed` metric. The month-end report CronJob on AKS calls the same ledger inside the cluster, nightly until the change.
+3. Azure Monitor evaluates the existing lab alert rules and the new orders SLO alert; Container insights sends pod inventory, events, logs and CPU to Log Analytics; the availability test keeps probing "/".
+4. Azure SRE Agent: response plan `mission-orders` (Sev 1, title contains "slo-burn", Review mode) opens a thread, runs a hypothesis-driven investigation over Application Insights, Log Analytics, metrics, alerts and the Azure CLI, proposes an action, waits for on-behalf-of approval, runs the approved suspend with `az aks command invoke` and verifies. Every tool call lands in its audit log in Application Insights.
+5. The Mission Control backend (`/api/mission/*`) combines the pulse, alerts, ledger and report pod inventory, uptime, the agent thread and the audit log, derives phase and marks, and persists the session under `/home/data` so a restart does not lose the show.
 6. The Mission Control screen polls `/api/mission/snapshot` every 2 s. Presenter actions post to `/api/mission/*`, which dispatches the existing Lab Operations runner (Container Apps job) for Baseline, Inject, Restore and End.
-7. Verification uses three independent signals: the `X-Payments-Version` header seen by the storefront (fix live), the pulse (recovered) and the agent's own VERIFIED line (verified).
+7. Verification uses three independent signals: the `X-Ledger-Batch-Active` header seen by the portal (fix live), the pulse (recovered) and the agent's own VERIFIED line (verified).
 
 ### 7.2 Data sources and delays
 
 | Source | Used for | Typical delay | How the screen shows it |
 |---|---|---|---|
-| Storefront pulse (in the web app) | Business rail, impact and recovery marks, fix observed | Real time | "Live storefront traffic · last checkout n s ago" |
+| Portal pulse (in the web app) | Business rail, impact and recovery marks, batch and fix observed | Real time | "Live portal traffic · last order n s ago" |
 | Azure Monitor alerts (Alerts Management API) | Alert rail, first alert mark | Rule evaluation plus about 15 s cache | Fired time per alert |
-| Container insights (KubePodInventory) | Pods ready and restarts on the payments node | About 1–3 min ingestion | Shown from the investigation phase on |
+| Container insights (KubePodInventory) | Ledger pods ready and report pods running | About 1–3 min ingestion | Shown from the investigation phase on |
 | Availability results | Uptime chip | Test frequency | "Uptime test n/5 locations passing" |
 | Azure SRE Agent data plane | Thread, findings, approval status | 3 s polling | Agent state and quotes with timestamps |
 | Agent audit log (Application Insights custom events) | Sources queried, scan ring, query trail | About 1 min | "audit log, about 1 min behind" |
@@ -371,9 +390,9 @@ These previews show the target look. They come from a design harness fed with si
 | Identity | Needs | Status |
 |---|---|---|
 | Control Center managed identity | Monitoring Reader and Log Analytics Reader on the lab resource group; SRE Agent Reader on the agent (read threads); optional SRE Agent Standard User (page the agent). | Extend: role grants in the setup script |
-| Lab Operations runner identity | Existing AKS and resource-group rights; mission operations add checks for patch deployments, patch cronjobs, delete jobs and get pods in namespace `demo`. | Exists, small extension |
+| Lab Operations runner identity | Existing AKS and resource-group rights; mission operations add checks for patch cronjobs, patch and delete jobs, patch deployments and get pods in namespace `demo`. | Exists, small extension |
 | Azure SRE Agent | Low access level (reader roles). Writes only through an approved on-behalf-of action. | Exists |
-| Presenter | Control Center operator allowlist; SRE Agent Administrator to approve; rights on the AKS cluster for the approved action. | Exists; verify per presenter |
+| Presenter | Control Center operator allowlist; SRE Agent Administrator to approve; rights on the AKS cluster for the approved action (run command). | Exists; verify per presenter |
 
 ## 8. Repository plan
 
@@ -385,7 +404,7 @@ What matters in the lab for this work (checked against `main` in late October 20
 
 | Area | Where | Role in this demo |
 |---|---|---|
-| Control Center | `workloads/webapp` (.NET 8 App Service, `Program.cs`, `LabOperationCatalog.cs`, `LabOperationsService.cs`, `frontend/` vanilla JavaScript bundled by esbuild through `frontend/build.mjs` into `wwwroot/console.js`, `wwwroot/index.html`) | Hosts the storefront API, the Mission Control backend and the big screen. `Program.cs` already protects `/api/operations` with an operator allowlist (Easy Auth principal when hosted, loopback locally), a same-origin check and a request header for POSTs, plus named rate limiters. |
+| Control Center | `workloads/webapp` (.NET 8 App Service, `Program.cs`, `LabOperationCatalog.cs`, `LabOperationsService.cs`, `frontend/` vanilla JavaScript bundled by esbuild through `frontend/build.mjs` into `wwwroot/console.js`, `wwwroot/index.html`) | Hosts the portal API, the Mission Control backend and the big screen. `Program.cs` already protects `/api/operations` with an operator allowlist (Easy Auth principal when hosted, loopback locally), a same-origin check and a request header for POSTs, plus named rate limiters. |
 | Lab Operations runner | Container Apps job; image built by ACR Tasks from the file list in `scripts/initialize-webapp-console.ps1`; operations run through `scripts/invoke-lab-operation.ps1`; journal under `/home/data/lab-operations` | Runs Baseline, Inject, Restore and End. One active run at a time. |
 | Fault scripts | `scripts/break-the-lab.ps1`, `scripts/restore-the-lab.ps1`, `scripts/simulate-high-cpu.ps1`, the release annotation operation | Patterns to reuse; CPU simulation is optional noise. |
 | AKS workloads | `workloads/k8s/01`–`05` in namespace `demo`: hello-frontend, the loadgen CronJob (every minute, about 15% calls to `/api/explode`), loadgen-ramp, otel-caller (about 10% errors), a Node.js OpenTelemetry sample | The default traffic keeps 5xx and failed-request alerts firing on purpose; Baseline pauses it during a show and End resumes it. |
@@ -400,18 +419,18 @@ Default names: resource group `rg-azure-monitor-lab`; Kubernetes namespace `demo
 | Piece | Status | What exactly |
 |---|---|---|
 | Lab deployment: resource group, App Service, AKS, VMs, Log Analytics, Application Insights, Container insights | Exists | Reuse as deployed. |
-| Control Center web app | Extend | Add the Mission Control mode (`/mission.html`, `/api/mission/*`) and the storefront API (`/api/shop/*`). |
+| Control Center web app | Extend | Add the Mission Control mode (`/mission.html`, `/api/mission/*`) and the portal API (`/api/portal/*`). |
 | Lab Operations runner and journal | Extend | Five mission operations; one session-level consent replaces the per-operation dialog during the show. |
 | `invoke-lab-operation.ps1` and `initialize-webapp-console.ps1` | Extend | Allow the mission operations; add the mission script and manifests to the runner image. |
 | break-the-lab and restore-the-lab | Exists | Not the hero incident; their kubectl and annotation patterns are reused. |
-| CPU simulation and release annotation | Exists | Optional unrelated noise; the release marker for payments-api 2.4.1. |
+| CPU simulation and release annotation | Exists | Optional unrelated noise; the change marker for the schedule change. |
 | Default traffic: loadgen CronJob, otel-caller, loadgen-ramp | Exists | Paused during the show, resumed by End. |
 | Alert rules, availability test, health model | Exists | The signal storm; uptime stays green (the "board versus business" moment). |
-| Checkout SLO burn alert | Build | `infra/modules/mission-alerts.bicep`, deployed by Setup. |
-| Azure SRE Agent resource, connectors and response plans | Extend | Add response plan `mission-checkout` and custom agent `mission-sre`; switch the lab response plans off during the show. |
-| payments-api workload | Build | Manifests 06 (2.4.0), 08 (release 2.4.1), 09 (back to 2.4.0). |
+| Orders SLO burn alert | Build | `infra/modules/mission-alerts.bicep`, deployed by Setup. |
+| Azure SRE Agent resource, connectors and response plans | Extend | Add response plan `mission-orders` and custom agent `mission-sre`; switch the lab response plans off during the show. |
+| Core ledger and month-end report | Build | Manifests 06 (core ledger), 08 (report CronJob, nightly), 09 (the schedule change). |
 | Synthetic customers | Build | Manifest 07: k6 job. |
-| Storefront API and business pulse | Build | Checkout and catalog endpoints, in-process pulse, Application Insights telemetry. |
+| Portal API and business pulse | Build | Order and catalog endpoints, in-process pulse, Application Insights telemetry. |
 | Mission Control backend and screen | Build | Session, fuse, phase and marks, snapshot API, agent feed, recording and replay; the big screen and its design harness. |
 | Scripts | Build | `mission-control.ps1`, `mission-preflight.ps1`, `setup-mission-sre-agent.ps1`. |
 | Documentation | Extend / build | `docs/SRE-MISSION-CONTROL.md`, a new scenario in `docs/DEMO-SCENARIOS.md`, a README link. |
@@ -420,14 +439,14 @@ Default names: resource group `rg-azure-monitor-lab`; Kubernetes namespace `demo
 
 | File | Change | Done when |
 |---|---|---|
-| `workloads/webapp/Program.cs` | Register the mission services; add a `mission-reads` rate limiter; add `/api/mission` to the protected-paths middleware and owner capture exactly like `/api/operations`; map the shop and mission endpoints. `/api/shop` stays outside operator auth but requires the customer key header and has its own limiter. | Operators get `/api/mission/snapshot`; others get 401 or 403; k6 traffic reaches `/api/shop`. |
+| `workloads/webapp/Program.cs` | Register the mission services; add a `mission-reads` rate limiter; add `/api/mission` to the protected-paths middleware and owner capture exactly like `/api/operations`; map the portal and mission endpoints. `/api/portal` stays outside operator auth but requires the customer key header and has its own limiter. | Operators get `/api/mission/snapshot`; others get 401 or 403; k6 traffic reaches `/api/portal`. |
 | `workloads/webapp/LabOperationCatalog.cs` | Add `mission-baseline`, `mission-inject`, `mission-inject-noise`, `mission-restore`, `mission-end`. | They appear in the Lab Operations tab. |
 | `workloads/webapp/LabOperationsService.cs` | Add a typed internal dispatch for mission operations (used only inside a consented mission session) and a way to read a run's latest state; keep the journal and the one-run-at-a-time rule. | Mission Control can start and follow a run without the per-operation dialog. |
 | `scripts/invoke-lab-operation.ps1` | Allow the five operations; map them to `mission-control.ps1` actions; add the Kubernetes permission pre-checks; keep all existing guards. | Each operation runs in the runner image. |
 | `scripts/initialize-webapp-console.ps1` | Add `scripts/mission-control.ps1` and `workloads/k8s/07`, `08`, `09` to the runner image file list. | The runner image contains the files. |
 | `workloads/webapp/frontend/build.mjs` and `package.json` | Second entry point for the mission screen (output `wwwroot/mission.js`); scripts `test:mission` and `dev:mission`. | `npm run build` emits both bundles. |
 | `workloads/webapp/wwwroot/index.html` | A "Mission Control" link in the navigation. | The link opens `/mission.html`. |
-| App Service configuration | Mission settings (9.7); if App Service authentication requires sign-in site-wide, exclude `/api/shop/*`. | Settings present; anonymous shop calls are not redirected to sign-in. |
+| App Service configuration | Mission settings (9.7); if App Service authentication requires sign-in site-wide, exclude `/api/portal/*`. | Settings present; anonymous portal calls are not redirected to sign-in. |
 | `docs/DEMO-SCENARIOS.md`, `README.md` | New scenario and reset steps; link to `docs/SRE-MISSION-CONTROL.md` and `DESIGN.md`. | A colleague can run the demo from the docs alone. |
 
 ### 8.4 New files
@@ -438,96 +457,104 @@ Default names: resource group `rg-azure-monitor-lab`; Kubernetes namespace `demo
 | `.github/workflows/copilot-setup-steps.yml` | Tools for Copilot's cloud environment (work item 0). |
 | `.github/workflows/mission-ci.yml` | Build and test checks on every pull request (work item 0). |
 | `docs/mission/agent-trials.md` | Gate A procedure and trial log (work item 5). |
-| `workloads/k8s/06-payments-api.yaml` | payments-api 2.4.0: code, deployment, LoadBalancer service (9.1). |
+| `workloads/k8s/06-core-ledger.yaml` | Core ledger: code, deployment, in-cluster and LoadBalancer services (9.1). |
 | `workloads/k8s/07-mission-customers.yaml` | k6 synthetic customers job (9.2). |
-| `workloads/k8s/08-payments-api-release-2.4.1.yaml` | The release that causes the incident (9.1). |
-| `workloads/k8s/09-payments-api-baseline-2.4.0.yaml` | Converge back to the healthy baseline (9.1). |
-| `workloads/webapp/MissionControl/` | Storefront API, pulse, Azure clients, signals, agent feed, session coordinator, endpoints (9.3, 9.7). |
+| `workloads/k8s/08-month-end-report.yaml` | Report code and CronJob, nightly at 02:00 (9.2). |
+| `workloads/k8s/09-month-end-report-business-hours.yaml` | The schedule change that causes the incident (9.2). |
+| `workloads/webapp/MissionControl/` | Portal API, pulse, Azure clients, signals, agent feed, session coordinator, endpoints (9.3, 9.7). |
 | `workloads/webapp/wwwroot/mission.html`, `mission.css` | The big screen (9.8). |
 | `workloads/webapp/frontend/mission-control.js`, `mission-model.js` | Rendering and the pure view-model (9.8). |
 | `workloads/webapp/frontend/dev/mission-dev-server.mjs` | Local design harness with simulated, watermarked data (9.8). |
-| `workloads/webapp/frontend/tests/` and a .NET test project | View-model tests; phase, mark and shop tests (9.7, 9.8). |
+| `workloads/webapp/frontend/tests/` and a .NET test project | View-model tests; phase, mark and portal tests (9.7, 9.8). |
 | `scripts/mission-control.ps1` | Setup, Baseline, Inject, Restore, End, Status (9.5). |
 | `scripts/mission-preflight.ps1` | GO / NO-GO checks (9.9). |
 | `scripts/setup-mission-sre-agent.ps1` | Custom agent, response plan guidance, role checks (9.6). |
-| `infra/modules/mission-alerts.bicep` | Checkout SLO burn alert (9.4). |
+| `infra/modules/mission-alerts.bicep` | Orders SLO burn alert (9.4). |
 | `workloads/mission/agent/mission-sre.instructions.md` | Agent reporting format and safety rules (9.6). |
-| `workloads/mission/knowledge/tailwind-traders-service-map.md` | Topology, SLOs and owners for the agent (9.6). |
+| `workloads/mission/knowledge/contoso-service-map.md` | Topology, SLOs and owners for the agent (9.6). |
 | `docs/SRE-MISSION-CONTROL.md` | Setup, run of show, fallbacks, reset, capability truth table (9.10). |
 
 ## 9. Component specifications
 
-### 9.1 payments-api
+### 9.1 Core ledger
 
-**Purpose.** A small, believable payment authorisation service on AKS whose memory use under checkout load sits between 128 MiB and 256 MiB, so release 2.4.1 fails only under real traffic.
+**Purpose.** A small, believable system of record on AKS that every customer order needs and that the nightly report also reads. It has a fixed pool of workers per pod shared by all clients, so a heavy client in business hours makes customer orders queue. This is the only failure mode.
 
 **Behaviour**
 
 - Python 3.11 standard library only, shipped in a ConfigMap and run on the public `python:3.11-slim` image, so no image build is needed.
-- `POST /v1/authorize` with `amount`, `currency` and `channel` returns an authorisation id and `approved` or `declined` (about 1% declined; a decline is a normal business outcome, not a failure).
-- `GET /healthz` (process alive) and `GET /readyz` (reference data loaded).
-- Every response carries `X-Payments-Version` with the running version. Requests must carry the shared `X-Payments-Key` from a Kubernetes secret; others get 401.
-- Memory profile (design targets; tune to meet the acceptance checks): about 40 MiB of synthetic reference data (card ranges, risk tables) loaded at start-up, plus a bounded in-memory cache of recent authorisations (about 120 entries of about 1 MiB, oldest evicted). Under the customer load the working set settles well under 256 MiB and passes 128 MiB within about a minute.
-- JSON log lines on stdout: a start-up line with version, memory limit read from the cgroup, resident memory, reference data size and cache size; a stats line every 15 s with resident memory and cache entries; one line per authorisation (id, outcome, latency). These are the agent's evidence in ContainerLogV2.
-- No artificial errors and no "explode" endpoints. The memory limit is the only failure mode.
+- Worker pool: 4 workers per pod (`LEDGER_WORKERS`), a first-in, first-out queue in front of it, and a queue timeout of 8 s (a request that waited longer gets 503 `queue_timeout`). Each request holds one worker for its whole service time.
+- `POST /v1/postings` (an order posting: `amount`, `currency`, `channel`, `reference`) returns a posting id and `accepted` or `rejected` (about 1% rejected; a rejection is a normal business outcome, not a failure). Service time about 25–40 ms.
+- `GET /v1/statements?period=…&segment=…` (a statement extract) returns an aggregate for the segment. Service time 2–3 s, spent mostly in a simulated scan (sleep) plus a small amount of real computation, so the ledger's CPU stays modest while its workers are busy.
+- `GET /healthz` (process alive) and `GET /readyz` (reference data loaded). Health endpoints bypass the worker pool, so probes never fail: the pods stay Ready and nothing restarts.
+- Every request carries `X-Client-Id` (`customer-portal`, `month-end-report`, …) and the shared `X-Ledger-Key` from a Kubernetes secret; others get 401.
+- Every response carries `X-Ledger-Queue-Ms` (time this request waited) and `X-Ledger-Batch-Active` (statement requests running or queued on this pod at response time).
+- JSON log lines on stdout: a start-up line (version, pool size, queue timeout); one line per request (time, client, operation, queue wait in ms, service time in ms, status); a stats line every 15 s (busy workers, pool size, queue depth, p95 queue wait, and the busy share per client over the last 15 s). These are the agent's evidence in ContainerLogV2.
+- No artificial errors and no "explode" endpoints.
 
-**Manifests**
-
-- `06-payments-api.yaml`: ConfigMap with the service code; Deployment `payments-api` in namespace `demo` with labels `app=payments-api` and `version=2.4.0`, environment `APP_VERSION=2.4.0`, 2 replicas, rolling update with maxSurge 1 and maxUnavailable 0, memory request 192Mi and limit 256Mi, readiness probe on `/readyz` every 2 s, liveness probe on `/healthz`; Service of type LoadBalancer (port 80 to the container port) with an Azure DNS label and `loadBalancerSourceRanges` limited to the web app's outbound IPs. Setup fills both placeholders.
-- `08-payments-api-release-2.4.1.yaml`: a strategic-merge patch that only sets version 2.4.1 (label and `APP_VERSION`), memory request 96Mi, limit 128Mi, and the change-cause annotation "Release 2.4.1 - rightsizing FIN-2291". Nothing else changes.
-- `09-payments-api-baseline-2.4.0.yaml`: a patch that converges the deployment back to the 2.4.0 values from any state.
+**Manifest `06-core-ledger.yaml`**: ConfigMap with the service code; Deployment `core-ledger` in namespace `demo` with labels `app=core-ledger` and `version=3.2.0`, 2 replicas, CPU request 250m and memory request 128Mi (with limits 1 CPU and 256Mi), readiness probe on `/readyz`, liveness probe on `/healthz`; a ClusterIP Service `core-ledger` for in-cluster clients; a Service `core-ledger-public` of type LoadBalancer (port 80 to the container port) with an Azure DNS label and `loadBalancerSourceRanges` limited to the web app's outbound IPs. Setup fills both placeholders.
 
 The LoadBalancer is the simplest path from App Service to AKS in this lab; private networking is a later improvement (P2).
 
-### 9.2 Synthetic customers
+### 9.2 Synthetic customers and the month-end report
+
+**Synthetic customers**
 
 - `07-mission-customers.yaml`: ConfigMap with a k6 script and a Job template (`grafana/k6` image, job name unique per session, active deadline about 110 minutes, cleaned up 10 minutes after it ends).
-- Constant arrival rate: about 90 checkouts per minute (`POST /api/shop/checkout`, random product and quantity) and about 240 catalogue views per minute (`GET /api/shop/catalog`) for about 100 minutes.
+- Constant arrival rate: about 90 orders per minute (`POST /api/portal/orders`, random product and quantity) and about 240 portal views per minute (`GET /api/portal/catalog`) for about 100 minutes.
 - Headers: `X-Amlab-Channel` (web 60%, mobile 30%, partner 10%) and `X-Lab-Customer-Key`.
 - No thresholds or abort conditions: the job must keep running through the incident.
-- The storefront URL, rates and duration are filled in by the script that starts the job.
+- The portal URL, rates and duration are filled in by the script that starts the job.
 
-### 9.3 Storefront API and business pulse
+**The month-end report**
+
+- `08-month-end-report.yaml`: ConfigMap with the report code (Python standard library) and CronJob `month-end-report` in namespace `demo`, labels `app=month-end-report`, schedule `0 2 * * *` with `timeZone` set to the configured time zone (default `Europe/Brussels`), `concurrencyPolicy: Forbid`, `startingDeadlineSeconds: 120`, `suspend: false`, history limits 3 and 1. The Job template: parallelism 4, `activeDeadlineSeconds: 1800` (a real report would finish after about 25 minutes), `ttlSecondsAfterFinished: 600`, CPU request 100m with no CPU limit, memory request 64Mi and limit 128Mi. Setup applies it with `-BatchName` as the CronJob name (default `month-end-report`).
+- Report behaviour: each pod runs 1 statement worker at start and adds one every 45 s up to 4 (16 parallel clients across the Job after about 3 minutes). Each worker loops: `GET /v1/statements` for the next segment with `X-Client-Id` set to the CronJob name, then aggregates the result locally with real CPU work for about 1 s. The ledger's pool (8 workers across 2 pods) is therefore fully busy, and orders wait behind statement requests.
+- Log lines on stdout: a start line (job name, schedule, time zone, trigger `schedule` or `manual` read from the Job's annotations, period, planned workers), a progress line every 30 s (segments done, active workers, mean ledger time) and an end line.
+- Design targets, tuned in work item 1: without the report, order p95 under 300 ms; with the report at full concurrency, at least half of all orders exceed the portal's 3 s timeout within 4 minutes of the start; the ledger pods stay Ready with no restarts.
+- `09-month-end-report-business-hours.yaml`: the change, as a strategic-merge patch template for the CronJob: `spec.schedule` set to `{{SCHEDULE}}` and the annotation `kubernetes.io/change-cause: "FIN-2291: run month-end report in business hours for the finance cut-off"`. Inject fills `{{SCHEDULE}}` with the next whole minute (at least 20 s away) in the configured time zone. Nothing else changes.
+
+### 9.3 Portal API and business pulse
 
 Implemented in the Control Center web app.
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /api/shop/catalog` | Six fictional Tailwind Traders products (SKU, name, price in EUR). Counted as a browse. |
-| `POST /api/shop/checkout` | Optional `sku` and `quantity`. Calls payments-api `POST /v1/authorize` with a 2.5 s timeout; one retry after about 150 ms on timeout, connection error or 5xx. Success: 200 with order id, amount, currency and payments version. Failure: 502 with `error: payment_failed` and a reason. |
+| `GET /api/portal/catalog` | Six fictional Contoso products (SKU, name, price in EUR), served from memory. Counted as a browse. It never calls the ledger, so browsing stays fast during the incident. |
+| `POST /api/portal/orders` | Optional `sku` and `quantity`. Calls the core ledger `POST /v1/postings` with `X-Client-Id: customer-portal` and a 3 s timeout; one retry after about 150 ms only on a connection error (never on a timeout, to avoid adding load). Success: 200 with order id, amount, currency and ledger queue wait. Failure: 504 or 502 with `error: order_failed` and a reason. |
 
-- Failure reasons start with `payments_`: `payments_timeout`, `payments_connection_refused`, `payments_connection_reset`, `payments_http_<status>`. The screen uses the prefix to attribute failures to payments.
+- Failure reasons start with `ledger_`: `ledger_timeout`, `ledger_queue_timeout`, `ledger_connection_refused`, `ledger_connection_reset`, `ledger_http_<status>`. The screen uses the prefix to attribute failures to the core ledger.
 - Access: anonymous (no sign-in), but `X-Lab-Customer-Key` must match the configured key (401 otherwise), with a dedicated rate limiter (for example 1,200 calls per minute).
-- Telemetry, using the SDK the web app already uses: request telemetry; dependency telemetry for the payments call; a `ShopCheckout` custom event (outcome confirmed, declined or failed; reason; channel; payments version; amount bucket); a custom metric `shop.checkout.failed` with value 1 for a failed checkout and 0 otherwise, so its average is the failure rate; a checkout duration metric.
-- Business pulse, in memory, for the big screen: 1-second buckets kept for 30 minutes with attempts, confirmed, declined, failed, failure reasons, latencies, revenue of confirmed orders and browses. Derived values: success rate ((confirmed + declined) / attempts) over the last 60 s, orders per minute, sales per minute (EUR), browses per minute, p50 and p95 checkout latency, failure rate and reasons, a 30-minute series of 10-second points (attempts, success, p95) and the time of the last checkout.
-- Version observations: every `X-Payments-Version` seen, with the first time each version appeared. They drive "change observed" and "fix observed".
+- Telemetry, using the SDK the web app already uses: request telemetry; dependency telemetry for the ledger call (named "core-ledger"); a `PortalOrder` custom event (outcome confirmed, rejected or failed; reason; channel; ledger queue wait; amount bucket); a custom metric `portal.order.failed` with value 1 for a failed order and 0 otherwise, so its average is the failure rate; an order duration metric.
+- Business pulse, in memory, for the big screen: 1-second buckets kept for 30 minutes with attempts, confirmed, rejected, failed, failure reasons, latencies, ledger queue waits, revenue of confirmed orders and browses. Derived values: success rate ((confirmed + rejected) / attempts) over the last 60 s, orders per minute, sales per minute (EUR), browses per minute, p50 and p95 order latency, p95 ledger queue wait, failure rate and reasons, a 30-minute series of 10-second points (attempts, success, p95) and the time of the last order.
+- Batch observations: from `X-Ledger-Batch-Active` on every ledger response, the first time after the session start that batch work was seen, and the first time after that when no response showed batch work for 30 s. They drive "batch observed" and "fix observed".
 - The pulse is per instance and assumes the lab's single App Service instance. Aggregating across instances through Application Insights is a P1 item.
 
-### 9.4 Checkout SLO alert
+### 9.4 Orders SLO alert
 
 - `infra/modules/mission-alerts.bicep`, deployed by `mission-control.ps1 -Action Setup` so it works with both lab deployment paths.
-- `alert-checkout-slo-burn`: metric alert on the lab Application Insights, custom metric `shop.checkout.failed`, average above 0.05 over 5 minutes, evaluated every minute, severity 1, auto-mitigate on, metric validation skipped (the metric only exists once traffic flows), notifying the lab action group. Its name and description contain "checkout": the response plan filters on that word.
-- If metric alerts on the custom metric are not available for the way the web app emits metrics, use a log search alert on the checkout requests' failure ratio over 5 minutes, evaluated every minute (slower because of ingestion delay), and record the choice in the docs.
+- `alert-orders-slo-burn`: metric alert on the lab Application Insights, custom metric `portal.order.failed`, average above 0.05 over 5 minutes, evaluated every minute, severity 1, auto-mitigate on, metric validation skipped (the metric only exists once traffic flows), notifying the lab action group. Its name and description contain "slo-burn": the response plan filters on that word, whatever `Noun` the screen uses.
+- If metric alerts on the custom metric are not available for the way the web app emits metrics, use a log search alert on the order requests' failure ratio over 5 minutes, evaluated every minute (slower because of ingestion delay), and record the choice in the docs.
 
 ### 9.5 Mission operations
 
-**Script `scripts/mission-control.ps1`** (PowerShell 7). Parameters: `-Action Setup | Baseline | Inject | Restore | End | Status`, `-ResourceGroup` (default from the lab configuration), `-WebAppName` (discovered if omitted), `-WithNoise`, `-EnableAgentPaging`.
+**Script `scripts/mission-control.ps1`** (PowerShell 7). Parameters: `-Action Setup | Baseline | Inject | Restore | End | Status`, `-ResourceGroup` (default from the lab configuration), `-WebAppName` (discovered if omitted), `-BatchName` (default `month-end-report`), `-TimeZone` (default `Europe/Brussels`), `-WithNoise`, `-EnableAgentPaging`.
 
 | Action | Where it runs | What it does |
 |---|---|---|
-| Setup | Locally, once, by the owner (needs rights to assign roles) | Discover the lab resources (web app, AKS, Application Insights, Log Analytics, action group, agent). Generate the customer key and the payments key and store them as App Service settings and a Kubernetes secret. Apply manifest 06 with the DNS label (for example `tailwind-pay-<suffix>`) and the web app's outbound IPs as source ranges; wait for the public IP and build the FQDN. Set the mission app settings (9.7). Deploy `mission-alerts.bicep`. Grant the web app identity Monitoring Reader and Log Analytics Reader on the resource group (if missing) and SRE Agent Reader on the agent; SRE Agent Standard User only with `-EnableAgentPaging`. Print the next step (agent setup). |
-| Baseline | Runner (`mission-baseline`) | Converge payments to 2.4.0 (manifest 09) and wait until ready. Suspend the loadgen CronJob, scale otel-caller to 0 (remember the previous count), delete a leftover loadgen-ramp job, undo break-the-lab leftovers in `demo` using the existing restore logic. Start a new customers job and print its name. |
-| Inject | Runner (`mission-inject`, `mission-inject-noise`) | Guard: payments 2.4.0 ready and a customers job running, otherwise stop with a clear message. Apply manifest 08. Wait up to 2 minutes for the rollout but never fail because it did not finish (crash-looping pods are the point). Write the release annotation "payments-api 2.4.1" with the lab's annotation mechanism. With noise, start the lab's CPU simulation on the demo VMs for 10 minutes in the background; it can never block or fail the inject. |
-| Restore | Runner (`mission-restore`) | If 2.4.1 is running, roll the deployment back; then apply manifest 09 and wait until ready (at most 3 minutes). |
+| Setup | Locally, once, by the owner (needs rights to assign roles) | Discover the lab resources (web app, AKS, Application Insights, Log Analytics, action group, agent). Generate the customer key and the ledger key and store them as App Service settings and a Kubernetes secret. Apply manifest 06 with the DNS label (for example `contoso-ledger-<suffix>`) and the web app's outbound IPs as source ranges; wait for the public IP and build the FQDN. Apply manifest 08 with the batch name and time zone. Set the mission app settings (9.7). Deploy `mission-alerts.bicep`. Grant the web app identity Monitoring Reader and Log Analytics Reader on the resource group (if missing) and SRE Agent Reader on the agent; SRE Agent Standard User only with `-EnableAgentPaging`. Print the next step (agent setup). |
+| Baseline | Runner (`mission-baseline`) | Converge the report to its nightly baseline: suspend its active Jobs and delete Jobs created by the CronJob in the last 24 hours, then re-apply manifest 08 (schedule `0 2 * * *`, `suspend: false`, change-cause "Baseline: nightly at 02:00"). Check core-ledger is ready. Suspend the loadgen CronJob, scale otel-caller to 0 (remember the previous count), delete a leftover loadgen-ramp job, undo break-the-lab leftovers in `demo` using the existing restore logic. Start a new customers job and print its name. |
+| Inject | Runner (`mission-inject`, `mission-inject-noise`) | Guard: report at baseline with no active Job, core-ledger ready and a customers job running, otherwise stop with a clear message. Apply manifest 09 with the next whole minute as schedule. Write the lab's release annotation "Config change FIN-2291: month-end-report schedule" with the lab's annotation mechanism, as a pipeline would. Wait until the Job has started (at most 90 s) and print its name; never fail because it has not started yet. With noise, start the lab's CPU simulation on the demo VMs for 10 minutes in the background; it can never block or fail the inject. |
+| Restore | Runner (`mission-restore`) | Suspend the CronJob and every active Job it owns (the same action the agent proposes), then converge to the baseline as in Baseline without restarting customers. Finishes in under 2 minutes. |
 | End | Runner (`mission-end`) | Delete the customers job, run Restore, resume the loadgen CronJob and otel-caller, print a summary. |
-| Status | Anywhere | Versions, pod readiness and restarts, jobs, fired alerts. |
+| Status | Anywhere | Report schedule and suspend state, active report Jobs and pods, ledger readiness, jobs, fired alerts. |
 
-Rules: idempotent; namespace `demo` only; never delete Azure resources; each runner action finishes in under 3 minutes; clear one-line progress messages for the journal.
+Rules: idempotent; namespace `demo` only; never delete Azure resources (Kubernetes Jobs created by the mission may be deleted); each runner action finishes in under 3 minutes; clear one-line progress messages for the journal.
 
 **Runner wiring**
 
 - `LabOperationCatalog.cs`: the five operations with plain descriptions; they require approval like break and restore when started from the Lab Operations tab.
-- `invoke-lab-operation.ps1`: allow them, map each to its action, check Kubernetes permissions first (patch deployments, patch cronjobs, delete jobs, get pods in `demo`), keep every existing guard (no resource group or subscription switching).
+- `invoke-lab-operation.ps1`: allow them, map each to its action, check Kubernetes permissions first (patch cronjobs, patch and delete jobs, patch deployments, get pods in `demo`), keep every existing guard (no resource group or subscription switching).
 - `initialize-webapp-console.ps1`: add the mission script and manifests 07, 08 and 09 to the runner image.
 - `LabOperationsService.cs`: a typed internal method that Mission Control uses to dispatch mission operations without the per-operation dialog, allowed only inside a session where the operator typed the resource group and gave consent; plus a method to refresh a run's state.
 
@@ -535,19 +562,19 @@ Rules: idempotent; namespace `demo` only; never delete Azure resources; each run
 
 **`workloads/mission/agent/mission-sre.instructions.md`**, the custom agent's instructions, must contain:
 
-- Role: the on-call SRE for Tailwind Traders.
-- Method: quantify customer impact first; state explicit hypotheses and test each with data; look for recent changes (deployments, rollouts, configuration) before restarting anything; classify every fired alert as cause, symptom or unrelated.
+- Role: the on-call SRE for Contoso.
+- Method: quantify customer impact first; state explicit hypotheses and test each with data; look for recent changes (deployments, configuration, schedules) and for other consumers of shared dependencies before restarting or scaling anything; classify every fired alert as cause, symptom or unrelated.
 - Reporting format: the line prefixes in [Appendix A](#appendix-a-agent-reporting-format), each on its own line, written as the work progresses.
-- Mitigation rules: no change without approval; the smallest safe, reversible action; prefer undoing the most recent relevant change over restarting or scaling; never delete resources.
-- Verification: after an approved action, re-check the original signals for at least 3 minutes (checkout failures below 1%, payment dependency success restored, no new container restarts) before writing VERIFIED and one or two LEARNING lines.
-- It must not mention payments memory, rightsizing, releases, OOM or anything else about the injected fault.
+- Mitigation rules: no change without approval; the smallest safe, reversible action; prefer pausing or undoing the most recent relevant change over restarting or scaling; never delete resources.
+- Verification: after an approved action, re-check the original signals for at least 3 minutes (order failures below 1%, ledger dependency duration back to normal, no new errors) before writing VERIFIED and one or two LEARNING lines.
+- It must not mention batch jobs, reports, schedules, CronJobs, the ledger's worker pool or anything else about the injected fault.
 
-**`workloads/mission/knowledge/tailwind-traders-service-map.md`**: the services (customers, storefront on App Service, payments-api on AKS namespace `demo`), dependencies, SLOs (checkout success at least 99% over 5 minutes; checkout p95 under 1.5 s), owners (storefront, payments and platform teams) and where the telemetry lives. No fault information.
+**`workloads/mission/knowledge/contoso-service-map.md`**: the services (customers, the portal on App Service, the core ledger on AKS namespace `demo`), their consumers (the portal in business hours; the month-end report, nightly), dependencies, SLOs (order success at least 99% over 5 minutes; order p95 under 1.5 s), owners (portal, ledger, finance reporting and platform teams) and where the telemetry lives. No fault information: it states what is normal, never what will break.
 
 **`scripts/setup-mission-sre-agent.ps1`**:
 
 - Create or update the custom agent `mission-sre` with those instructions through the agent's data-plane API (preview); if that fails, print the portal steps instead.
-- Print the portal steps for response plan `mission-checkout`: Azure Monitor incidents, severity Sev 1, title contains "checkout", Review mode, handled by `mission-sre` where the product supports it (otherwise the default agent with the same instructions).
+- Print the portal steps for response plan `mission-orders`: Azure Monitor incidents, severity Sev 1, title contains "slo-burn", Review mode, handled by `mission-sre` where the product supports it (otherwise the default agent with the same instructions).
 - Print the steps to switch off `amlab-app-alerts` and `amlab-platform-alerts` during shows, so other alerts do not open competing threads.
 - Optionally upload the knowledge file; check the web app identity's agent role; print the agent's portal URL.
 
@@ -563,10 +590,11 @@ Product reality: response plans, custom agents, knowledge files and the data-pla
 |---|---|
 | `LabConsole__Mission__Enabled` | Turns the mode on. |
 | `LabConsole__Mission__ResourceGroup`, `LabConsole__Mission__SubscriptionId` | The lab scope; the operator must type the resource group to start a session. |
-| `LabConsole__Mission__PaymentsBaseUrl`, `LabConsole__Mission__PaymentsKey`, `LabConsole__Mission__CustomerKey` | Storefront to payments, and the shop's customer key. |
-| `LabConsole__Mission__AppInsightsResourceId`, `LabConsole__Mission__WorkspaceId`, `LabConsole__Mission__AksName` | Telemetry and cluster. |
+| `LabConsole__Mission__LedgerBaseUrl`, `LabConsole__Mission__LedgerKey`, `LabConsole__Mission__CustomerKey` | Portal to core ledger, and the portal's customer key. |
+| `LabConsole__Mission__AppInsightsResourceId`, `LabConsole__Mission__WorkspaceId`, `LabConsole__Mission__AksName`, `LabConsole__Mission__BatchName` | Telemetry, cluster and the report CronJob name. |
 | `LabConsole__Mission__SreAgentResourceId`, `LabConsole__Mission__SreAgentPortalUrl` | The agent. |
-| `LabConsole__Mission__Brand`, `LabConsole__Mission__Subtitle` | "Tailwind Traders", "Online store · Production". |
+| `LabConsole__Mission__Brand`, `LabConsole__Mission__Subtitle` | "Contoso", "Customer orders · Production". |
+| `LabConsole__Mission__Noun`, `LabConsole__Mission__NounSingular`, `LabConsole__Mission__BatchLabel` | Screen words only (2.1): "orders", "order", "Month-end report". |
 | `LabConsole__Mission__StatePath` | Default `/home/data/mission` (session and recordings). |
 
 **Endpoints.** All `/api/mission/*` endpoints sit behind the operator allowlist exactly like `/api/operations`; POSTs also need the same request header and same-origin check. Every state-changing call records the operator.
@@ -590,46 +618,46 @@ Product reality: response plans, custom agents, knowledge files and the data-pla
 
 | Mark | Rule |
 |---|---|
-| Change observed (time, version) | First time the storefront sees a payments version other than 2.4.0 after the session started. |
+| Batch observed (time) | First time after the session start that a ledger response shows batch work (`X-Ledger-Batch-Active` above 0). |
 | Impact | When trailing 20 s success is below 97% with at least 15 attempts: the first 5-second bucket in the last 90 s with at least 3 attempts and success below 97%. |
 | First alert (time, rule) | Earliest Azure Monitor alert fired after the session start (minus 1 minute). |
 | Agent engaged (time, how) | Hero thread created ("alert"), or the paged thread created ("paged"). |
 | Root cause | Time of the first agent message in the hero thread with a ROOT CAUSE line. |
 | Approval requested / approved | First approval request in the hero thread; the moment its status becomes approved. |
-| Fix observed (time, how) | Storefront sees 2.4.0 again after a change was observed; "agent" or "runbook". |
+| Fix observed (time, how) | After batch work was observed, the start of the first 30 s in which no ledger response shows batch work; "agent" (after an approval) or "runbook". |
 | Recovered | After an approval, fix or restore: trailing 45 s success at least 99% with at least 45 attempts, and the first good bucket after the last bad one is at least 45 s old. The mark is that bucket's time. |
 | Verified | Time of the first agent message with a VERIFIED line. |
 
 **Phase** is the furthest reached of: ended, verified, recovered, mitigating (approved, fix observed or restore requested), awaiting-approval, root-cause, investigating, alerting, impact, armed (fuse set, not fired), operational; standby when there is no session.
 
-**Hero thread.** A paged thread wins. Otherwise the newest thread created after the first alert (minus 1 minute) whose title mentions checkout; otherwise the newest thread created after the first alert.
+**Hero thread.** A paged thread wins. Otherwise the newest thread created after the first alert (minus 1 minute) whose title mentions "slo-burn"; otherwise the newest thread created after the first alert.
 
 **Snapshot contract** (camelCase JSON):
 
 | Field | Content |
 |---|---|
 | `now`, `simulated` | Server time; `simulated` is true only in the design harness. |
-| `brand` | Name and subtitle. |
-| `configured` | Flags for mode, shop, agent, alerts, operations and agent paging. |
+| `brand` | Name, subtitle, noun, singular noun and batch label. |
+| `configured` | Flags for mode, portal, agent, alerts, operations and agent paging. |
 | `session` | Null, or id, start time, phase, noise, fuse time and state, marks, replay id, end time. |
-| `pulse` | Availability, window, attempts, success rate, orders, sales and browses per minute, p50, p95, failure rate and reasons, 30-minute series (time, attempts, success, p95), time of the last checkout. |
+| `pulse` | Availability, window, attempts, success rate, orders, sales and browses per minute, p50, p95, p95 ledger queue wait, failure rate and reasons, 30-minute series (time, attempts, success, p95), time of the last order, batch observations. |
 | `uptime` | Availability, locations, passing locations, time checked, message. |
-| `topology` | Nodes `customers`, `storefront`, `payments` with a state (healthy, degraded, critical or unknown) and live metrics; edges with state and rate per second. Payments metrics include pods, ready pods, restarts and when they were observed. |
+| `topology` | Nodes `customers`, `portal`, `ledger` and `batch` with a state (healthy, degraded, critical or unknown) and live metrics; edges with state and rate per second. Ledger metrics include pods, ready pods, restarts and p95 queue wait; batch metrics include report pods running and when they were observed. The screen decides when to reveal the `batch` node (6.4). |
 | `alerts` | Availability, message, items: id, rule, friendly title, severity, state, condition (fired or resolved), target, target type, fired time, resolved time. |
 | `agent` | Availability, status, message, thread (id, title, created, source), messages (id, time, role, type, text, complete, approval with id, title, description and status), current approval, footprints (time, kind, tool, input), whether footprints are available, recorded flag and label, portal URL. |
 | `operations` | Latest runner operation, state, submitted time, message. |
-| `presenter` | Presenter view only: payments version now, version history, hero thread id, notes. |
+| `presenter` | Presenter view only: report schedule and suspend state, active report Job, hero thread id, notes. |
 
 **Data sources.** Each has a timeout and a cache, fails on its own (`available: false` with a message) and never breaks the snapshot.
 
 | Source | How | Cache |
 |---|---|---|
-| Alerts | Alerts Management API for the lab resource group since session start minus 5 minutes (subscription scope filtered by resource group as fallback). Friendly titles: `alert-checkout-slo-burn` "Checkout SLO burn", `alert-webapp-5xx` "Storefront HTTP 5xx", `alert-appinsights-failed-requests` "Failed requests", `amba-webapp-response-time` "Storefront response time", `alert-aks-pod-restart-spike` "AKS pod restarts", `alert-vm-cpu-high` "VM CPU high", `alert-aks-node-cpu-high` "AKS node CPU high". | 15 s |
-| Payments pods | Log Analytics `KubePodInventory` for namespace `demo` and payments-api: pods, ready, restarts, last status (for example OOMKilled), version label. | 30 s |
+| Alerts | Alerts Management API for the lab resource group since session start minus 5 minutes (subscription scope filtered by resource group as fallback). Friendly titles: `alert-orders-slo-burn` "<Noun> SLO burn" (for example "Orders SLO burn"), `alert-webapp-5xx` "Portal HTTP 5xx", `alert-appinsights-failed-requests` "Failed requests", `amba-webapp-response-time` "Portal response time", `alert-aks-pod-restart-spike` "AKS pod restarts", `alert-vm-cpu-high` "VM CPU high", `alert-aks-node-cpu-high` "AKS node CPU high". | 15 s |
+| Ledger and report pods | Log Analytics `KubePodInventory` for namespace `demo`: core-ledger pods, ready and restarts; pods of Jobs owned by the report CronJob, with start time and status. | 30 s |
 | Uptime | Application Insights availability results for the last 10 minutes, by location. | 60 s |
 | Agent thread | Azure SRE Agent data plane: the endpoint is the agent resource's `agentEndpoint` property; Microsoft Entra token for the agent's audience; list threads, read thread messages. Only `*.azuresre.ai` hosts are allowed. Poll every 3 s while a session is active. | 3 s |
 | Agent footprints | Application Insights custom events written by the agent (`AgentToolExecution`, `AgentAzCliExecution`, `ApprovalDecision`) for the hero thread; about 1 minute behind. | 20 s |
-| Pulse and versions | In process (9.3). | Live |
+| Pulse and batch observations | In process (9.3). | Live |
 
 **Security.** Managed identity only; no secrets in responses; agent text returned as plain text (the screen escapes it); allowlisted outbound hosts.
 
@@ -646,9 +674,9 @@ Product reality: response plans, custom agents, knowledge files and the data-pla
 - The centre stage follows the phase (6.3) unless the presenter overrides it.
 - Escape all agent text; never render HTML from the agent.
 - Parse the agent's report lines (Appendix A) tolerantly: allow bullets, bold, numbering and dash variations. When the agent has not used the format, show its latest text verbatim with its timestamp.
-- Labels: "Simulated data" watermark when `simulated` is true; amber "RECORDED RUN · not live" banner; "Agent paged manually"; "Rolled back by runbook · not the agent"; "audit log, about 1 min behind" next to footprints; "not measured" for missing values; "not reached" for marks in the debrief.
+- Labels: "Simulated data" watermark when `simulated` is true; amber "RECORDED RUN · not live" banner; "Agent paged manually"; "Paused by runbook · not the agent"; "audit log, about 1 min behind" next to footprints; "not measured" for missing values; "not reached" for marks in the debrief.
 - Gates: 401 shows a sign-in link; 403 says the account is not on the operator list; 404 says Mission Control is not installed.
-- Presenter drawer (Shift+P, or always open with `?view=presenter`): start session (typed resource group, consent, noise toggle), fuse buttons (1, 2, 3 minutes, random 2–4 minutes), inject now, disarm, page the agent, roll back via runbook, save and play recordings, stage override, end session, links to the agent portal and the Control Center, keyboard help. Ask for confirmation before inject, restore, page and end.
+- Presenter drawer (Shift+P, or always open with `?view=presenter`): start session (typed resource group, consent, noise toggle), fuse buttons (1, 2, 3 minutes, random 2–4 minutes), inject now, disarm, page the agent, pause via runbook, save and play recordings, stage override, end session, links to the agent portal and the Control Center, keyboard help. Ask for confirmation before inject, restore, page and end.
 - Keyboard: Shift+P drawer, 0 auto, 1 map, 2 investigation, 3 root cause, 4 recovery, 5 or D debrief, F full screen, Esc close.
 - Accessibility: honour prefers-reduced-motion; text contrast at least 4.5:1.
 
@@ -658,7 +686,7 @@ Product reality: response plans, custom agents, knowledge files and the data-pla
 
 ### 9.9 Preflight
 
-`scripts/mission-preflight.ps1` prints a GO / NO-GO table, exits with an error on any NO-GO and finishes in under a minute. Checks: Azure context and resource group; web app running with the mission settings; runner enabled; AKS reachable; payments 2.4.0 ready with no recent restarts; public IP and source ranges match the web app's outbound IPs; customers job running for at least 10 minutes; default noise paused; three test checkouts succeed; `/mission.html` returns 200; the SLO alert exists, is enabled and is not firing; no other lab alert firing; agent data plane reachable (the response plan can only be checked in the portal: WARN with a link); Log Analytics daily cap headroom; demo VMs running if noise is planned.
+`scripts/mission-preflight.ps1` prints a GO / NO-GO table, exits with an error on any NO-GO and finishes in under a minute. Checks: Azure context and resource group; web app running with the mission settings; runner enabled; AKS reachable; core ledger ready with no recent restarts; the report CronJob on `0 2 * * *`, not suspended, with no active Job; public IP and source ranges match the web app's outbound IPs; customers job running for at least 10 minutes; default noise paused; three test orders succeed with ledger queue wait under 100 ms; `/mission.html` returns 200; the orders SLO alert exists, is enabled and is not firing; no other lab alert firing; agent data plane reachable (the response plan can only be checked in the portal: WARN with a link); Log Analytics daily cap headroom; demo VMs running if noise is planned.
 
 ### 9.10 Documentation
 
@@ -673,9 +701,9 @@ The presenter runs the whole show from one browser window: Mission Control in fr
 ### 10.1 Once, the day before
 
 1. Deploy or update the lab from this repository (`scripts/deploy.ps1`, including the SRE Agent stage) and redeploy the Control Center.
-2. Run `scripts/mission-control.ps1 -Action Setup`: payments-api, public IP and DNS name, managed identity roles, SLO alert, app settings.
-3. Run `scripts/setup-mission-sre-agent.ps1` and complete the printed portal steps: custom agent `mission-sre`, response plan `mission-checkout` (Sev 1, title contains "checkout", Review mode), lab response plans switched off for the event.
-4. Full dress rehearsal on the venue network; measure the three uncontrolled intervals (first alert, investigation, approval and rollback). Then "Save this run" as the fallback recording.
+2. Run `scripts/mission-control.ps1 -Action Setup` (add `-BatchName` and set the `Noun` and `BatchLabel` settings for an industry preset, 2.1): core ledger, report CronJob, public IP and DNS name, managed identity roles, SLO alert, app settings.
+3. Run `scripts/setup-mission-sre-agent.ps1` and complete the printed portal steps: custom agent `mission-sre`, response plan `mission-orders` (Sev 1, title contains "slo-burn", Review mode), lab response plans switched off for the event.
+4. Full dress rehearsal on the venue network; measure the four uncontrolled intervals (report start, first alert, investigation, approval and action). Then "Save this run" as the fallback recording.
 
 ### 10.2 T-30 minutes
 
@@ -683,59 +711,61 @@ The presenter runs the whole show from one browser window: Mission Control in fr
 |---|---|---|
 | Sign-ins | Control Center (operator), Azure SRE Agent portal (Administrator), Azure Portal. | All three open without prompts. |
 | Preflight | `scripts/mission-preflight.ps1` | Every line GO. |
-| Session | Drawer: typed resource group and consent, Start session (runs Baseline). | Payments 2.4.0 ready; default noisy traffic paused; customers running. |
+| Session | Drawer: typed resource group and consent, Start session (runs Baseline). | Report on its nightly schedule; ledger ready; default noisy traffic paused; customers running. |
 | Warm-up | Let the customers run. | At least 10 minutes of traffic before going on stage. |
 | Alerts | Mission Control right rail and the Azure Portal. | No lab alert firing. |
-| Agent | SRE Agent portal. | `mission-checkout` on, lab plans off, no open rehearsal threads, agent memory reset or disclosed. |
+| Agent | SRE Agent portal. | `mission-orders` on, lab plans off, no open rehearsal threads, agent memory reset or disclosed. |
 | Fallback | Drawer: recordings list. | At least one recording available. |
 | Display | 1920×1080, zoom 100%, full screen (F), notifications off. | Readable from the back row. |
 | Tabs | Mission Control, SRE Agent portal, Azure Portal alerts, Control Center. | In that order in one window. |
 
 ### 10.3 T-5 minutes
 
-- Mission Control is green: checkout success 99% or better, steady orders per minute, 0 alerts, agent standing by.
+- Mission Control is green: order success 99% or better, steady orders per minute, 0 alerts, agent standing by.
 - Arm the fuse (2 minutes is a good default; random 2–4 minutes if the presenter wants to be surprised too), close the drawer, start talking.
 
 ### 10.4 Live sequence
 
-1. Act 1: introduce the store and the screen; do not mention what will happen.
-2. Acts 2–3: let the fuse fire; read the business numbers aloud, point at the green uptime test, let the alerts arrive. Optional 20-second cut to the Azure Portal alerts view.
+1. Act 1: introduce Contoso's order flow and the screen; do not mention what will happen.
+2. Acts 2–3: let the fuse fire; read the business numbers aloud, point at the green uptime test, let the alerts arrive, name the "scale out" temptation. Optional 20-second cut to the Azure Portal alerts view.
 3. Acts 4–5: the overlay announces the agent; narrate impact, hypotheses ruled out and the sources it queries. If it is slow, switch to the thread in the SRE Agent portal for 30 seconds.
 4. Act 6: stop talking when the root cause appears; then one line about the change.
 5. Act 7: switch to the SRE Agent tab, read the proposed command, approve, switch back.
-6. Act 8: point at the success line and the restarts stopping; wait for VERIFIED.
+6. Act 8: point at the success line and the queue wait dropping; wait for VERIFIED.
 7. Act 9: press D, deliver the closing lines, leave the debrief on screen for questions.
 
 ### 10.5 Talk track
 
 > "Everything you will see is live: real Azure, real telemetry, real agent. I am not going to tell you what happens next."
 
-> "Look at what the board says: uptime is green. Customers cannot pay."
+> "Look at what the board says: uptime is green. Customers cannot place an order. Nobody changed the order service today."
 
-> "Normally the bridge call starts now. Every team has its own dashboard and its own theory."
+> "Normally the bridge call starts now. Every team has its own dashboard and its own theory, and someone is already asking to scale out."
 
 > "Nobody paged it; the alert did. Watch what it rules out."
 
-> "It proposes, I approve. Review mode, my identity, audited."
+> "Nobody touched the order service. Someone moved a report."
 
-> "Not a status flag: customers paying again. That bridge call never happened."
+> "It proposes, I approve. It pauses the report; nothing is deleted. Review mode, my identity, audited."
+
+> "Not a status flag: customers ordering again. That bridge call never happened."
 
 ### 10.6 Fallback matrix
 
 | Step | Symptom | Action | Screen label |
 |---|---|---|---|
-| Inject | Runner slow or failed | "Inject now", or run the script from a terminal | None needed |
+| Inject | Runner slow or failed, or the report has not started 2 minutes after the inject | "Inject now", or run the script from a terminal | None needed |
 | Alert | No alert 5 minutes after impact | Show the business impact and the alert rules in the portal; page the agent | "Agent paged manually" |
 | Engagement | Alert fired, no thread after 2 minutes | Page the agent | "Agent paged manually" |
 | Investigation | No findings after 6 minutes | Open the thread side by side; after 9 minutes play the recording | "RECORDED RUN · not live" (amber) |
 | Root cause | The agent stops at a symptom | Ask a follow-up in the thread, visibly | None: it is live |
-| Approval | On-behalf-of approval fails or takes over 2 minutes | Roll back via runbook | "Rolled back by runbook · not the agent" |
+| Approval | On-behalf-of approval fails or takes over 2 minutes | Pause via runbook | "Paused by runbook · not the agent" |
 | Screen | Mission Control fails | Continue in the Azure Portal and the SRE Agent portal | Not applicable |
 | Venue | The network blocks the portals | Recording plus the screen previews, clearly labelled | Recorded |
 
 ### 10.7 Reset between sessions
 
-1. Drawer: End session (stops customers, restores payments, resumes default traffic).
+1. Drawer: End session (stops customers, puts the report back on its nightly schedule, resumes default traffic).
 2. Wait until the mission alerts show as resolved, or close them in the portal.
 3. Close the incident thread; reset or replace the agent's incident memory, or plan to disclose it.
 4. Start a new session and run preflight. Plan a 20–30 minute buffer between back-to-back shows; most of it is waiting for alerts to resolve and traffic to settle.
@@ -746,7 +776,7 @@ Last resort: the lab's `scripts/restore-the-lab.ps1`, then `scripts/mission-cont
 
 The debrief stays on screen: three measured numbers (alert to root cause, impact to recovery, and alerts fired against the single root cause) and two lanes. Traditional incident: many dashboards, many signals, several people, a long investigation. Agentic operations: incident, autonomous investigation, evidence, action, verification. No feature list, no invented ROI.
 
-> "A cost-saving change went out a quarter of an hour ago. You saw what customers felt, the alerts every team would have argued about, and an agent that worked the problem like a senior SRE: it checked the obvious, ruled things out with evidence, found the change, proposed the smallest fix and waited for a human. Everything ran on the Azure Monitor signals you already collect. Start with one service, the alerts you already have, and Review mode."
+> "One line of configuration moved a report into business hours. You saw what customers felt, the alerts every team would have argued about, including the one that said 'scale out', and an agent that worked the problem like a senior SRE: it checked the obvious, ruled things out with evidence, found the change in a different place from the failure, proposed the smallest reversible fix and waited for a human. Everything ran on the Azure Monitor signals you already collect. Start with one service, the alerts you already have, and Review mode."
 
 ## 12. Work items for GitHub Copilot
 
@@ -763,41 +793,42 @@ Do them in order, one pull request each: work items 0 to 5, then gate A (run by 
 - **Done when.** Both workflows pass on the pull request, the rules file exists, and the lab's behaviour is unchanged.
 - **Owner to do after merging.** Run "Copilot Setup Steps" once from the Actions tab to confirm it succeeds.
 
-### Work item 1: payments-api
+### Work item 1: Core ledger and month-end report
 
-- **Spec.** 9.1, 4.2, Appendix B.
-- **Build.** Manifests 06, 08 and 09, and a short load-test helper (for example a temporary k6 job aimed at the service) so the memory behaviour can be checked before the storefront exists.
-- **Done when (owner verifies on AKS).** 2.4.0 runs under the customer load for 30 minutes with 0 restarts and its working set stays clearly below 256 MiB; after applying 08 under the same load, pods are OOMKilled (exit code 137) within about 2 minutes and enter CrashLoopBackOff; 09 brings back a healthy 2.4.0; the logs show the memory limit and resident memory.
+- **Spec.** 9.1, 9.2 (month-end report), 4.2, Appendix B.
+- **Build.** Manifests 06, 08 and 09, and a short load-test helper (for example a temporary k6 job that sends about 90 postings per minute to the ledger) so the contention can be checked before the portal exists.
+- **Done when (owner verifies on AKS).** Under the order load for 30 minutes without the report: posting p95 under 300 ms, 0 restarts. A manual run of the report (`kubectl create job --from=cronjob/month-end-report`) under the same load: within 4 minutes at least half of the postings wait longer than 3 s; ledger pods stay Ready with 0 restarts; the ledger stats lines show the busy share per client. Applying 09 starts the Job at the scheduled minute, and its start line says `trigger: schedule`. Suspending the CronJob and the Job brings the queue wait back under 100 ms within 1 minute. Re-applying 08 restores the nightly schedule.
 
-### Work item 2: Storefront API, pulse and synthetic customers
+### Work item 2: Portal API, pulse and synthetic customers
 
-- **Spec.** 9.2, 9.3, 8.3 (`Program.cs`).
-- **Build.** The shop endpoints, the payments client, telemetry, the pulse with version observations, manifest 07, and tests (pulse arithmetic, failure reasons, the customer key check).
-- **Done when.** With the customers job running, Application Insights shows checkout requests, payment dependencies, `ShopCheckout` events and the `shop.checkout.failed` metric; the pulse success rate over 5 minutes matches Application Insights within 2 percentage points; calls without the customer key get 401; tests pass.
+- **Spec.** 9.2 (synthetic customers), 9.3, 8.3 (`Program.cs`).
+- **Build.** The portal endpoints, the ledger client, telemetry, the pulse with batch observations, manifest 07, and tests (pulse arithmetic, failure reasons, the customer key check, batch observation rules).
+- **Done when.** With the customers job running, Application Insights shows order requests, core-ledger dependencies, `PortalOrder` events and the `portal.order.failed` metric; the pulse success rate over 5 minutes matches Application Insights within 2 percentage points; calls without the customer key get 401; tests pass.
 
-### Work item 3: Checkout SLO alert
+### Work item 3: Orders SLO alert
 
 - **Spec.** 9.4.
-- **Done when.** The alert fires within 5 minutes of release 2.4.1 under load, resolves after Restore, and its name and description contain "checkout".
+- **Done when.** The alert fires within 5 minutes of the report starting under load, resolves after Restore, and its name and description contain "slo-burn".
 
 ### Work item 4: Mission operations
 
 - **Spec.** 9.5, 8.3 (runner files).
-- **Done when.** Every action is idempotent (running it twice gives the same result) and finishes in under 3 minutes in the runner; the five operations appear in the Lab Operations tab; after Baseline no lab alert is firing within 15 minutes.
+- **Done when.** Every action is idempotent (running it twice gives the same result) and finishes in under 3 minutes in the runner; the five operations appear in the Lab Operations tab; Inject starts the report Job at the next whole minute; after Baseline no lab alert is firing within 15 minutes and the CronJob is back on `0 2 * * *`.
 
 ### Work item 5: Azure SRE Agent setup
 
 - **Spec.** 9.6, Appendix A.
-- **Done when.** A test Sev 1 checkout alert opens a thread under `mission-checkout`; the web app identity can list threads; the pull request shows the instructions and knowledge file and confirms they contain no hint about the fault.
-- **Also add** `docs/mission/agent-trials.md`: the gate A procedure (below) and an empty trial log with columns for date, inject time, first alert, thread created, root cause named, minutes from first alert to root cause, proposed action, approval and rollback time, notes.
+- **Done when.** A test Sev 1 SLO burn alert opens a thread under `mission-orders`; the web app identity can list threads; the pull request shows the instructions and knowledge file and confirms the instructions contain no hint about the fault.
+- **Also add** `docs/mission/agent-trials.md`: the gate A procedure (below) and an empty trial log with columns for date, inject time, report start, first alert, thread created, root cause named, scale-out ruled out, minutes from first alert to root cause, proposed action, approval and action time, notes.
 
 ### Gate A: Prove the agent (owner, before work item 6)
 
 The screen is only worth building if the agent reliably solves this incident.
 
 - **Run** the incident 4 times with only the Azure Portal and the Azure SRE Agent portal: Baseline, wait 10 minutes, Inject, watch, approve the proposed action, End. Give the agent no hints. Log every run in `docs/mission/agent-trials.md`.
-- **Pass** when, in at least 3 of 4 runs, the agent names release 2.4.1 and its memory limit as the root cause within about 10 minutes of the first alert and proposes a rollback, and the approved rollback restores checkout.
-- **If it fails,** improve in this order and run the gate again: the evidence in the telemetry (start-up log line, OOMKilled status, rollout history, release annotation); the method in the agent instructions (never hints about the fault); the knowledge file; the strength of the incident (for example how quickly memory passes the limit); the alert and response plan. Ask Copilot for each change as a normal pull request.
+- **Pass** when, in at least 3 of 4 runs, the agent names the month-end report and its moved schedule as the root cause within about 10 minutes of the first alert, does not recommend scaling as the fix, proposes pausing or suspending the report, and the approved action restores orders.
+- **If it fails,** improve in this order and run the gate again: the evidence in the telemetry (ledger stats lines with the busy share per client, the report's start line, the change-cause annotation, the release annotation); the method in the agent instructions (never hints about the fault); the knowledge file; the strength of the incident (report concurrency, ledger pool size); the alert and response plan. Ask Copilot for each change as a normal pull request.
+- **Fallback scenario.** If the agent still cannot pass after two rounds of improvements, switch to the second scenario in section 13 (memory-limit release) rather than adding hints.
 - **Then** tell Copilot that gate A passed and continue with work item 6. Record the measured timings: they set the fallback triggers in section 10.6.
 
 ### Work item 6: Mission Control backend
@@ -831,7 +862,8 @@ The screen is only worth building if the agent reliably solves this incident.
 | Priority | Item | Why |
 |---|---|---|
 | P0 | Work items 0 to 9 and gate A | The killer demo: proven, repeatable and recoverable. |
-| P1 | Second scenario: storefront configuration drift | Variety for repeat audiences. |
+| P1 | Second scenario: memory-limit release (a cost-saving release cuts a service's memory limit; pods are OOMKilled under load; rollback) | Variety for repeat audiences and SRE-heavy rooms; also the fallback if gate A fails. |
+| P1 | Third scenario: portal configuration drift | Variety for repeat audiences. |
 | P1 | Pulse aggregated from Application Insights | Works with more than one web app instance. |
 | P1 | Agent post-incident write-up to a GitHub issue or Teams (check tool support first) | Shows LEARN beyond a line of text. |
 | P1 | Incident Analytics follow-up view for executives | Product metric for time to mitigate. |
@@ -840,7 +872,7 @@ The screen is only worth building if the agent reliably solves this incident.
 | P2 | Light theme for daylight rooms | Venue flexibility. |
 | P2 | Agent posts a Teams brief at verification | Ties into how teams actually work. |
 | P2 | Presenter console layout for a second screen | Comfort for the presenter. |
-| P2 | Private networking between App Service and payments-api | Removes the public load balancer. |
+| P2 | Private networking between App Service and the core ledger | Removes the public load balancer. |
 
 ## 14. Capability truth table
 
@@ -850,17 +882,17 @@ The screen is only worth building if the agent reliably solves this incident.
 |---|---|---|
 | Azure Monitor alert opens an investigation through a response plan | Product today | "The alert paged the agent." |
 | Hypothesis-driven root cause analysis over Application Insights, Log Analytics, metrics, alerts and the Azure CLI | Product today | The live thread and its findings. |
-| Finding the recent change from data (rollout history, ReplicaSets, annotations, Activity Log) | Product today: the agent's reasoning over data | "It found the change", not a dedicated AKS change-tracking feature. |
+| Finding the recent change from data (pod inventory, logs, annotations, Activity Log) | Product today: the agent's reasoning over data | "It found the change", not a dedicated Kubernetes change-tracking feature. |
 | Proposing a mitigation and running it after human approval in Review mode (on behalf of the approver) | Product today | Approval in the SRE Agent portal. |
 | Audit log of every tool call in Application Insights | Product today | Sources queried and the query trail. |
 | Autonomous mode, memory, knowledge files, custom agents, hooks, Python tools, MCP | Product today | Mentioned if asked; only custom instructions are used on stage. |
 | Incident Analytics (time to mitigate) | Product today | Optional executive follow-up (P1). |
-| Fault injection, synthetic customers, storefront and pulse | Demo orchestration | Stated plainly at the end: "we broke it on purpose, with a real release". |
-| Mission Control screen, phase and marks, fuse, recording and replay, runbook fallback | Demo orchestration | A lens on live data; labels whenever a fallback is used. |
+| Fault injection, synthetic customers, core ledger, report job, portal and pulse | Demo orchestration | Stated plainly at the end: "we broke it on purpose, with a real configuration change". |
+| Mission Control screen, phase and marks, fuse, recording and replay, runbook fallback, screen nouns | Demo orchestration | A lens on live data; labels whenever a fallback is used. |
 | Reporting line convention (IMPACT, HYPOTHESIS, ROOT CAUSE and so on) and its parsing | Demo orchestration | Our prompt convention, not a product feature. |
 | Mission Control as an Azure product screen | Not product: do not present | Never implied. |
-| Cross-rule alert correlation as a product feature | Not product: do not present | "6 alerts, 1 root cause" is the agent's analysis shown by our screen. |
-| Preventing the release before impact; fully autonomous production changes in this demo | Not shown | Out of scope. |
+| Cross-rule alert correlation as a product feature | Not product: do not present | "5 alerts, 1 root cause" is the agent's analysis shown by our screen. |
+| Preventing the change before impact; fully autonomous production changes in this demo | Not shown | Out of scope. |
 | Time or money saved beyond this run's measured timeline | Not claimed | Qualitative comparison only. |
 
 ## 15. Critical review
@@ -869,8 +901,9 @@ Would a room of experienced SREs find this genuinely impressive, or just polishe
 
 | Objection | Answer built into the design |
 |---|---|
-| "You broke it yourself; of course it finds it." | The fault is a real release through Kubernetes; the agent receives no hint; the knowledge file has no fault information; the presenter never names the fault before the agent does. Roulette mode (P2) removes presenter knowledge entirely. |
-| "OOMKilled is easy; any SRE finds it in five minutes." | True, and that is the point: at 3 a.m., across three teams, the symptoms show up on the storefront first. The agent rules out the storefront and the network with evidence, ties the restarts to the release, classifies every alert including an unrelated VM CPU alert, proposes the smallest safe fix and verifies it. The screen shows its queries, not just its conclusion. |
+| "You broke it yourself; of course it finds it." | The fault is a real configuration change through Kubernetes; the agent receives no hint; the knowledge file describes only what is normal; the presenter never names the fault before the agent does. Roulette mode (P2) removes presenter knowledge entirely. |
+| "A batch job hogging a database is textbook." | True, and that is the point: the textbook incident still costs an hour, because the symptom is on the portal, the CPU alert says "scale out", and the change is in a different team's CronJob. The agent rules out the portal, the network and capacity with evidence, finds which client is consuming the ledger, ties it to the schedule change, classifies every alert, proposes the smallest reversible fix and verifies it. The screen shows its queries, not just its conclusion. |
+| "A worker pool of four is contrived." | Fixed pools are how real systems of record protect themselves (connection pools, licensed sessions, thread pools). The pool size is in the manifest; show it when asked. The LEARNING the agent should write (separate batch capacity, rate limits, queue-wait alerts) is exactly the real fix. |
 | "That screen is a mock-up." | Every element names its source and delay; at least one cut to the real thread and the real alerts view; agent text appears only when it exists in the thread; recordings are labelled in amber. |
 | "The prompt staged the answer." | The custom instructions define a reporting format and safety rules only. They are in this repository; show them when asked. |
 | "Prerecorded AI typing." | No typing animation anywhere: text appears when the API returns it, with its timestamp. |
@@ -880,11 +913,12 @@ Would a room of experienced SREs find this genuinely impressive, or just polishe
 | "ROI theatre." | Only durations measured in this run, plus a qualitative comparison. |
 | "Green uptime is contrived." | It is the lab's real availability test on "/", a classic gap between synthetic uptime and business transactions. |
 
-What changed from the first draft:
+What changed from the first drafts:
 
 - Replaced the lab's break-the-lab story (obvious and multi-cause) with a single, realistic change-driven incident.
-- Hid pod-level details on the business map until the agent investigates, so the audience discovers the cause with the agent.
-- The release marker on the timeline appears only after the agent names the cause, then drops back in time.
+- Replaced the memory-limit release (version 1.x of this design) with a batch job in business hours, which every industry recognises; the memory-limit release becomes the second scenario.
+- Hid the report node and ledger queue details on the business map until the agent investigates, so the audience discovers the cause with the agent.
+- The schedule-change marker on the timeline appears only after the agent names the cause, then drops back in time.
 - Moved approval out of the custom screen into the product portal.
 - Removed any overlay or progress indicator that could suggest agent activity without data behind it.
 - Added a labelled fallback for every AI-dependent step and a recording that can never pass for live.
@@ -898,10 +932,14 @@ What changed from the first draft:
 | Web app managed identity reading the agent data plane | Agent lane on the screen | Assign SRE Agent Reader and read a thread | Show the thread in the SRE Agent portal |
 | Whether tool calls appear as thread messages | Query trail | Inspect a real thread | Audit log events (already designed in) |
 | Custom agent API shape | Setup script | Test the call | Portal steps printed by the script |
-| The agent chooses `az aks command invoke`; approval latency | Act 7 timing | Dress rehearsal | Runbook rollback, labelled |
-| KubeEvents collects only warnings by default | Evidence depth | Check the table | Pod inventory, logs and memory are enough |
+| The agent chooses `az aks command invoke`; approval latency | Act 7 timing | Dress rehearsal | Runbook pause, labelled |
+| KubeEvents collects only warnings by default (Job creation is a normal event) | Evidence depth | Check the table | Pod inventory, the report's start line and the ledger stats are enough |
+| The agent's low access level cannot read the CronJob spec | Change correlation | Gate A | The report's start line, the change-cause annotation in the release annotation, and pod start times |
+| Node CPU alert threshold versus node size | Whether the "scale out" red herring fires | Gate A | Optional VM CPU noise; the story works without it |
+| CronJob `timeZone` support on the cluster's Kubernetes version | Inject timing | Work item 1 | Compute the schedule in UTC |
+| Container logs volume from ledger request lines | Log Analytics cap | Measure in work item 1 | Sample request lines; keep the 15 s stats lines |
 | Alerting on the Application Insights custom metric | SLO alert | Deploy and fire it | Log search alert on requests (slower) |
-| App Service authentication on the web app | Synthetic traffic | Call `/api/shop` without signing in | Exclude `/api/shop/*` from sign-in |
+| App Service authentication on the web app | Synthetic traffic | Call `/api/portal` without signing in | Exclude `/api/portal/*` from sign-in |
 | In-process pulse needs one web app instance | Business rail | Instance count | Aggregate from Application Insights (P1) |
 | Log Analytics daily cap (1 GB in the lab) | Telemetry stops mid-show | Preflight headroom check | Raise the cap for the event |
 | Venue network to the Azure portals | Approval step | Test on site | Recording, labelled |
@@ -923,26 +961,27 @@ The custom agent writes these lines, each at the start of its own line, as its w
 | `VERIFIED:` | Recovery confirmed after at least 3 minutes | Verified box; phase verified |
 | `LEARNING:` | What to change to prevent recurrence | Debrief and follow-up |
 
-## Appendix B. Release 2.4.0 versus 2.4.1
+## Appendix B. The schedule change
 
-| Setting | 2.4.0 (baseline) | 2.4.1 (the incident) |
+| Setting | Baseline | The incident |
 |---|---|---|
-| Version label and `APP_VERSION` | 2.4.0 | 2.4.1 |
-| Memory request / limit | 192Mi / 256Mi | 96Mi / 128Mi |
-| Change cause | Baseline | Release 2.4.1 - rightsizing FIN-2291 |
-| Behaviour under checkout load | Stable; working set below the limit | Working set (reference data plus authorisation cache) exceeds 128Mi: OOMKilled, CrashLoopBackOff with growing back-off |
+| CronJob `month-end-report` schedule | `0 2 * * *` (02:00 in the configured time zone) | The next whole minute after the inject, in business hours |
+| Change cause | Baseline: nightly at 02:00 | FIN-2291: run month-end report in business hours for the finance cut-off |
+| Report concurrency | 4 pods × up to 4 statement workers | Unchanged |
+| Core ledger | 2 pods × 4 workers, shared by every client | Unchanged |
+| Effect at 02:00 | No customer traffic: the report takes the whole ledger and nobody notices | Customer orders queue behind statement extracts and time out at the portal |
 
 ## Appendix C. Glossary
 
 | Term | Plain meaning |
 |---|---|
-| OOMKilled | Kubernetes stopped a container because it used more memory than its limit (exit code 137). |
-| CrashLoopBackOff | A container keeps crashing; Kubernetes waits longer and longer before each restart. |
+| CronJob | A Kubernetes object that starts a Job on a schedule, like a scheduled task. |
+| Worker pool | A fixed number of requests a service handles at the same time; the rest wait in a queue. |
+| Queue wait | How long a request waits for a free worker before the work starts. |
+| Noisy neighbour | One workload using a shared resource so heavily that others suffer. |
+| Suspend | Pause a CronJob or Job in Kubernetes without deleting it; it can be resumed. |
 | SLO burn | Customers are failing faster than the reliability target allows. |
 | Sev 1 | The highest alert severity used in this demo. |
 | Response plan | An Azure SRE Agent rule that decides which alerts start an investigation, and how. |
 | Review mode | The agent proposes actions and a person approves them before anything changes. |
 | On-behalf-of approval | The approved action runs with the approver's identity and is audited. |
-| Rollout undo | Kubernetes returns a deployment to its previous version. |
-| Container insights | Azure Monitor's collection of Kubernetes inventory, events, logs and metrics. |
-| Fuse | A server-side timer that injects the incident so the audience never sees a button. |
