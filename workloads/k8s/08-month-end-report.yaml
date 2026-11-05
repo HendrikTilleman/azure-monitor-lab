@@ -1,0 +1,257 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: month-end-report-code
+  namespace: demo
+data:
+  report.py: |
+    import hashlib
+    import json
+    import os
+    import signal
+    import ssl
+    import threading
+    import time
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import quote, urlencode
+    from urllib.request import Request, urlopen
+
+
+    def log(event, **fields):
+        print(json.dumps({"time": datetime.now(timezone.utc).isoformat(),
+                          "event": event, **fields}), flush=True)
+
+
+    def kube_get(resource, name):
+        directory = Path("/var/run/secrets/kubernetes.io/serviceaccount")
+        token = (directory / "token").read_text().strip()
+        namespace = (directory / "namespace").read_text().strip()
+        host = os.environ["KUBERNETES_SERVICE_HOST"]
+        port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+        request = Request(f"https://{host}:{port}/apis/batch/v1/namespaces/{quote(namespace, safe='')}"
+                          f"/{resource}/{quote(name, safe='')}",
+                          headers={"Authorization": f"Bearer {token}"})
+        context = ssl.create_default_context(cafile=str(directory / "ca.crt"))
+        with urlopen(request, context=context, timeout=10) as response:
+            return json.load(response)
+
+
+    def metadata(job_name, batch_name):
+        job = kube_get("jobs", job_name)
+        annotations = job["metadata"].get("annotations", {})
+        owners = job["metadata"].get("ownerReferences", [])
+        cron_owner = next((owner["name"] for owner in owners
+                           if owner["kind"] == "CronJob" and owner.get("controller")), None)
+        manual = annotations.get("cronjob.kubernetes.io/instantiate") == "manual"
+        if manual:
+            trigger = "manual"
+        elif cron_owner:
+            trigger = "schedule"
+        else:
+            raise ValueError("Job has neither a CronJob controller nor a manual invocation annotation.")
+        if cron_owner and cron_owner != batch_name:
+            raise ValueError("Job owner does not match BATCH_NAME.")
+        cron = kube_get("cronjobs", batch_name)
+        return {"job": job_name, "client": batch_name, "trigger": trigger,
+                "schedule": cron["spec"]["schedule"], "timeZone": cron["spec"].get("timeZone", "controller local"),
+                "scheduledAt": annotations.get("batch.kubernetes.io/cronjob-scheduled-timestamp"),
+                "changeCause": cron["metadata"].get("annotations", {}).get("kubernetes.io/change-cause")}
+
+
+    class Report:
+        def __init__(self, base_url, key, batch_name, period, max_workers=6, ramp_seconds=45, duration=1500):
+            self.base_url = base_url.rstrip("/")
+            self.key = key
+            self.batch_name = batch_name
+            self.period = period
+            self.max_workers = max_workers
+            self.ramp_seconds = ramp_seconds
+            self.duration = duration
+            self.stopped = threading.Event()
+            self.failed = threading.Event()
+            self.lock = threading.Lock()
+            self.segments = 0
+            self.errors = 0
+            self.ledger_seconds = 0
+            self.sequence = 0
+            self.active_workers = 0
+            self.threads = []
+
+        def worker(self):
+            with self.lock:
+                self.active_workers += 1
+            try:
+                while not self.stopped.is_set():
+                    with self.lock:
+                        self.sequence += 1
+                        segment = str(self.sequence)
+                    query = urlencode({"period": self.period, "segment": segment})
+                    request = Request(f"{self.base_url}/v1/statements?{query}",
+                                      headers={"X-Ledger-Key": self.key, "X-Client-Id": self.batch_name})
+                    started = time.monotonic()
+                    try:
+                        with urlopen(request, timeout=12) as response:
+                            result = json.load(response)
+                        if not isinstance(result, dict) or not isinstance(result.get("aggregate"), int):
+                            raise ValueError("Ledger response has no aggregate.")
+                        elapsed = time.monotonic() - started
+                        with self.lock:
+                            self.segments += 1
+                            self.ledger_seconds += elapsed
+                        payload = json.dumps(result, sort_keys=True).encode()
+                        compute_until = time.monotonic() + 1
+                        while time.monotonic() < compute_until and not self.stopped.is_set():
+                            payload = hashlib.pbkdf2_hmac("sha256", payload, b"statement-aggregate", 10000)
+                    except HTTPError as error:
+                        with self.lock:
+                            self.errors += 1
+                        log("ledger_error", status=error.code, segment=segment)
+                        if error.code in (401, 403):
+                            self.failed.set()
+                            self.stopped.set()
+                        self.stopped.wait(1)
+                    except (URLError, TimeoutError, ConnectionError) as error:
+                        with self.lock:
+                            self.errors += 1
+                        log("ledger_error", errorType=type(error).__name__, message=str(error), segment=segment)
+                        self.stopped.wait(1)
+                    except (ValueError, KeyError) as error:
+                        log("invalid_ledger_response", message=str(error), segment=segment)
+                        self.failed.set()
+                        self.stopped.set()
+            finally:
+                with self.lock:
+                    self.active_workers -= 1
+
+        def progress(self):
+            with self.lock:
+                return {"segmentsDone": self.segments, "activeWorkers": self.active_workers,
+                        "errors": self.errors,
+                        "meanLedgerMs": self.ledger_seconds * 1000 / self.segments if self.segments else None}
+
+        def run(self):
+            started = time.monotonic()
+            next_progress = started + 30
+            while not self.stopped.is_set() and time.monotonic() - started < self.duration:
+                now = time.monotonic()
+                desired = min(self.max_workers, 1 + int((now - started) / self.ramp_seconds))
+                while len(self.threads) < desired:
+                    thread = threading.Thread(target=self.worker)
+                    self.threads.append(thread)
+                    thread.start()
+                if now >= next_progress:
+                    log("progress", **self.progress())
+                    next_progress = now + 30
+                self.stopped.wait(0.25)
+            self.stopped.set()
+            for thread in self.threads:
+                thread.join()
+            log("end", **self.progress(), failed=self.failed.is_set())
+            return 1 if self.failed.is_set() else 0
+
+
+    def main():
+        job = os.environ["JOB_NAME"]
+        batch = os.environ.get("BATCH_NAME", "month-end-report")
+        period = (datetime.now(timezone.utc).replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        key = os.environ["LEDGER_KEY"]
+        if not key:
+            raise ValueError("LEDGER_KEY must not be empty.")
+        report = Report(os.environ.get("LEDGER_URL", "http://core-ledger"), key, batch, period,
+                        max_workers=int(os.environ.get("REPORT_WORKERS", "6")))
+        if report.max_workers < 1:
+            raise ValueError("REPORT_WORKERS must be positive.")
+        evidence = metadata(job, batch)
+        log("start", **evidence, period=period, plannedWorkers=report.max_workers, rampSeconds=45)
+        signal.signal(signal.SIGTERM, lambda *_: report.stopped.set())
+        signal.signal(signal.SIGINT, lambda *_: report.stopped.set())
+        raise SystemExit(report.run())
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: month-end-report
+  namespace: demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: month-end-report-metadata
+  namespace: demo
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: month-end-report-metadata
+  namespace: demo
+subjects:
+  - { kind: ServiceAccount, name: month-end-report, namespace: demo }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: month-end-report-metadata
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: month-end-report
+  namespace: demo
+  labels: { app: month-end-report }
+  annotations:
+    kubernetes.io/change-cause: "Baseline: nightly at 02:00"
+spec:
+  schedule: "0 2 * * *"
+  timeZone: Europe/Brussels
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      parallelism: 4
+      completions: 4
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels: { app: month-end-report }
+        spec:
+          serviceAccountName: month-end-report
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 20
+          containers:
+            - name: report
+              image: python:3.11-slim
+              command: ["python", "-u", "-B", "/app/report.py"]
+              env:
+                - name: JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+                - { name: BATCH_NAME, value: month-end-report }
+                - { name: LEDGER_URL, value: "http://core-ledger" }
+                # Measured tuning: 16 clients did not meet the >3-second wait target.
+                - { name: REPORT_WORKERS, value: "6" }
+                - name: LEDGER_KEY
+                  valueFrom:
+                    secretKeyRef: { name: mission-ledger, key: key }
+              resources:
+                requests: { cpu: 100m, memory: 64Mi }
+                limits: { memory: 128Mi }
+              volumeMounts:
+                - { name: code, mountPath: /app, readOnly: true }
+          volumes:
+            - name: code
+              configMap: { name: month-end-report-code }

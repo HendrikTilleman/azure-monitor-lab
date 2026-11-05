@@ -1,0 +1,7 @@
+# Render {{SCHEDULE}} in spec.timeZone, at least 20 seconds in the future.
+# Use kubectl patch cronjob month-end-report -n demo --type strategic --patch-file <rendered-file>.
+metadata:
+  annotations:
+    kubernetes.io/change-cause: "FIN-2291: run month-end report in business hours for the finance cut-off"
+spec:
+  schedule: "{{SCHEDULE}}"

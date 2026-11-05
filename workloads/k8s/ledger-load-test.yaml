@@ -1,0 +1,183 @@
+# Temporary direct-ledger load, not the portal customer workload reserved for 07.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-load-test-code
+  namespace: demo
+data:
+  load.py: |
+    import collections
+    import json
+    import math
+    import os
+    import signal
+    import threading
+    import time
+    import uuid
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+
+    def log(event, **fields):
+        print(json.dumps({"time": datetime.now(timezone.utc).isoformat(),
+                          "event": event, **fields}), flush=True)
+
+
+    def percentile(values):
+        return sorted(values)[max(0, math.ceil(len(values) * 0.95) - 1)] if values else None
+
+
+    def summarize(records):
+        count = len(records)
+        measured = [record["queueMs"] for record in records if record["queueMs"] is not None]
+        return {"completed": count, "failed": sum(record["failed"] for record in records),
+                "rejected": sum(record["outcome"] == "rejected" for record in records),
+                "p95LatencyMs": percentile([record["latencyMs"] for record in records]),
+                "p95QueueMs": percentile(measured), "queueMeasured": len(measured),
+                "queueOver3sFraction": sum(value > 3000 for value in measured) / count if count else None,
+                "latencyOver3sFraction": sum(record["latencyMs"] > 3000 for record in records) / count if count else None}
+
+
+    class Load:
+        def __init__(self, base_url, key, rate=90, duration=1800):
+            self.base_url = base_url.rstrip("/")
+            self.key = key
+            self.rate = rate
+            self.duration = duration
+            self.stopped = threading.Event()
+            self.lock = threading.Lock()
+            self.slots = threading.BoundedSemaphore(32)
+            self.records = []
+            self.window = collections.deque()
+            self.dispatched = 0
+            self.dropped = 0
+
+        def posting(self, sequence, elapsed):
+            started = time.monotonic()
+            queue_ms = None
+            status = None
+            outcome = None
+            failure = None
+            body = json.dumps({"amount": 42.50, "currency": "EUR",
+                               "channel": "web", "reference": str(uuid.uuid4())}).encode()
+            request = Request(self.base_url + "/v1/postings", data=body,
+                              headers={"Content-Type": "application/json",
+                                       "X-Client-Id": "customer-portal", "X-Ledger-Key": self.key})
+            try:
+                try:
+                    response = urlopen(request, timeout=12)
+                except HTTPError as error:
+                    response = error
+                with response:
+                    status = response.status
+                    value = response.headers.get("X-Ledger-Queue-Ms")
+                    queue_ms = float(value) if value is not None else None
+                    result = json.load(response)
+                    outcome = result.get("outcome")
+                    if status != 200:
+                        failure = result.get("error", f"http_{status}")
+                    elif outcome not in ("accepted", "rejected"):
+                        failure = "invalid_outcome"
+            except (URLError, TimeoutError, ConnectionError, ValueError) as error:
+                failure = type(error).__name__ + ": " + str(error)
+            finally:
+                finished = time.monotonic()
+                record = {"sequence": sequence, "dispatchElapsed": round(elapsed, 3),
+                          "latencyMs": round((finished - started) * 1000, 3),
+                          "queueMs": queue_ms, "status": status, "outcome": outcome,
+                          "failed": failure is not None, "error": failure}
+                with self.lock:
+                    self.records.append(record)
+                    self.window.append((finished, record))
+                log("posting", **record)
+                self.slots.release()
+
+        def progress(self):
+            with self.lock:
+                now = time.monotonic()
+                while self.window and self.window[0][0] < now - 30:
+                    self.window.popleft()
+                return {"windowSeconds": 30, "dispatched": self.dispatched, "dropped": self.dropped,
+                        **summarize([record for _, record in self.window])}
+
+        def run(self):
+            started = time.monotonic()
+            next_progress = started + 30
+            interval = 60 / self.rate
+            sequence = 0
+            log("start", ratePerMinute=self.rate, durationSeconds=self.duration)
+            with ThreadPoolExecutor(max_workers=32) as executor:
+                while not self.stopped.is_set() and sequence * interval < self.duration:
+                    target = started + sequence * interval
+                    if self.stopped.wait(max(0, target - time.monotonic())):
+                        break
+                    now = time.monotonic()
+                    if self.slots.acquire(blocking=False):
+                        with self.lock:
+                            self.dispatched += 1
+                        executor.submit(self.posting, sequence, now - started)
+                    else:
+                        self.dropped += 1
+                        log("arrival_dropped", sequence=sequence, reason="32_requests_in_flight")
+                    sequence += 1
+                    if now >= next_progress:
+                        log("window", **self.progress())
+                        next_progress = now + 30
+            log("end", offered=sequence, dispatched=self.dispatched, dropped=self.dropped,
+                elapsedSeconds=round(time.monotonic() - started, 3), **summarize(self.records))
+            return 1 if self.dropped else 0
+
+
+    def main():
+        rate = float(os.environ.get("POSTINGS_PER_MINUTE", "90"))
+        duration = float(os.environ.get("DURATION_SECONDS", "1800"))
+        key = os.environ["LEDGER_KEY"]
+        if not key or not 1 <= rate <= 600 or not 1 <= duration <= 7200:
+            raise ValueError("Require a nonempty key, rate 1..600/min and duration 1..7200 seconds.")
+        load = Load(os.environ.get("LEDGER_URL", "http://core-ledger"), key, rate, duration)
+        signal.signal(signal.SIGTERM, lambda *_: load.stopped.set())
+        signal.signal(signal.SIGINT, lambda *_: load.stopped.set())
+        raise SystemExit(load.run())
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ledger-load-test
+  namespace: demo
+  labels: { app: ledger-load-test }
+spec:
+  activeDeadlineSeconds: 7240
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: ledger-load-test }
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: load
+          image: python:3.11-slim
+          command: ["python", "-u", "-B", "/app/load.py"]
+          env:
+            - { name: LEDGER_URL, value: "http://core-ledger" }
+            - { name: POSTINGS_PER_MINUTE, value: "90" }
+            - { name: DURATION_SECONDS, value: "1800" }
+            - name: LEDGER_KEY
+              valueFrom:
+                secretKeyRef: { name: mission-ledger, key: key }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          volumeMounts:
+            - { name: code, mountPath: /app, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: ledger-load-test-code }
