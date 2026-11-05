@@ -552,7 +552,7 @@ Automatic deployment by `mission-control.ps1 -Action Setup` belongs to work
 item 4; until then the owner can deploy it explicitly as shown below, or use
 the manually triggered GitHub Actions workflow.
 
-### Deploy from GitHub Actions (OIDC)
+### Deploy from GitHub Actions (service principal)
 
 `.github/workflows/deploy-mission-alerts.yml` runs on a GitHub-hosted runner,
 not the interactive cloud terminal. It deploys **only the alert module** in
@@ -561,43 +561,43 @@ rest of the lab. It never runs on push or pull request. Only `master` is allowed
 The first run defaults to **preview only**.
 
 An owner with Azure role-assignment permission and GitHub repository
-administration access must configure the following once. This setup cannot be
-performed by an unauthenticated terminal or a GitHub token without environment
-administration permissions.
+administration access must configure the following once. Credentials stay in
+GitHub; they are not read by or copied to the interactive cloud terminal.
 
 1. In GitHub, open **Settings > Environments > New environment**, name it
    `azure-lab`, restrict deployment branches to `master`, and add a required
    reviewer where your plan supports it. Configure protection before running
    the workflow; do not rely on an automatically created, unprotected environment.
-2. In Azure Portal, create a dedicated **user-assigned managed identity** in
-   the lab resource group. Under **Federated credentials > Add credential**,
-   select the GitHub Actions scenario, this repository's owner/name, entity
-   type **Environment**, and environment `azure-lab`. The issuer is
-   `https://token.actions.githubusercontent.com`, audience
-   `api://AzureADTokenExchange`, and subject
-   `repo:HendrikTilleman/azure-monitor-lab:environment:azure-lab` for this fork.
-   Change the subject when using another fork.
-3. On the **lab resource group's IAM**, grant that identity **Monitoring
+2. Use a dedicated **Microsoft Entra app registration / service principal**.
+   Store its client secret **value** (not the secret's ID or credential JSON)
+   in the repository Actions secret **`azure_lab`**. Do not paste it in chat,
+   commit it, or put it in a variable. Rotate it before expiry.
+3. On the **lab resource group's IAM**, grant that service principal **Monitoring
    Contributor** scoped to that resource group only. This built-in role grants
    monitoring-resource management and ARM deployment operations; do not grant
    subscription-wide Contributor or Owner. A stricter custom role can further
    restrict writes to metric alerts and resource-group deployments if required.
-4. In the GitHub `azure-lab` environment, add the following **variables**
-   (not a client secret or credential JSON):
+   If the identity already has subscription-wide Contributor, it can deploy,
+   but an owner should narrow that assignment after granting the lab-scoped role.
+4. In **Settings > Secrets and variables > Actions > Variables**, add the
+   three required repository variables below. Environment variables in
+   `azure-lab` may also be used and take precedence over repository variables.
 
 | Variable | Value |
 |---|---|
-| `AZURE_CLIENT_ID` | Managed identity's client ID, not its object/principal ID |
+| `AZURE_CLIENT_ID` | App registration's application/client ID, not its object/principal ID |
 | `AZURE_TENANT_ID` | Lab directory/tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | Existing lab subscription ID |
-| `AZURE_RESOURCE_GROUP` | Existing lab resource group name |
-| `APPINSIGHTS_ID` | Full resource ID of the lab Application Insights component |
-| `ACTION_GROUP_ID` | Full resource ID of the existing lab action group |
+| `AZURE_RESOURCE_GROUP` | Optional; defaults to `rg-azure-monitor-lab` |
+| `APPINSIGHTS_NAME` | Optional; defaults to `appi-amlab` |
+| `ACTION_GROUP_NAME` | Optional; defaults to `ag-amlab-email` |
 
-Both resource IDs must belong to the configured lab subscription and resource
-group; the workflow rejects other targets before Azure login. OIDC avoids
-stored Azure passwords and client secrets. Do not copy Azure tokens here or
-into GitHub variables.
+The defaults match `lab.config.json.example` and `infra/main.bicep` with
+`namePrefix=amlab`. Override them if the deployed lab uses other names. The
+workflow constructs both resource IDs within the configured subscription and
+resource group and fails if either does not exist; it does not search for or
+select another lab. The secret is supplied only to the login step, never
+printed, and Azure's cached credentials are cleared at the end of the job.
 
 After merging the workflow into `master`, go to **Actions > Deploy mission
 alerts > Run workflow**, select `master`, and leave **Apply the alert** unchecked.
@@ -608,10 +608,11 @@ Runs are serialized; a newer request does not cancel an in-progress deployment.
 
 A green deployment proves the ARM settings were applied, **not** that telemetry
 arrived, a notification was delivered, or the alert fired/resolved on time.
-Complete the owner checks below. If login fails, check the exact federation
-subject/environment and identity IDs; if authorization fails, check the
-resource-group role assignment and allow for propagation. No password-based
-fallback is configured.
+Complete the owner checks below. If login fails, check the client/tenant IDs
+and secret value/expiry; if authorization fails, check the resource-group role
+assignment and allow for propagation. Passwordless GitHub OIDC is a future
+hardening option; the current workflow explicitly uses the owner-provided
+service-principal secret.
 
 The enabled metric rule `alert-orders-slo-burn` has severity 1, evaluates every
 minute and fires when the five-minute **Average** of `portal.order.failed` is
