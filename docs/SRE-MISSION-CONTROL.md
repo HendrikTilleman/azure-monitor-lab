@@ -549,7 +549,69 @@ not the five-minute Azure telemetry comparison or an AKS acceptance claim.
 the **existing lab Application Insights component** and notifying the **existing
 lab action group**. It does not modify the main Bicep/Terraform deployment.
 Automatic deployment by `mission-control.ps1 -Action Setup` belongs to work
-item 4; until then the owner can deploy it explicitly as shown below.
+item 4; until then the owner can deploy it explicitly as shown below, or use
+the manually triggered GitHub Actions workflow.
+
+### Deploy from GitHub Actions (OIDC)
+
+`.github/workflows/deploy-mission-alerts.yml` runs on a GitHub-hosted runner,
+not the interactive cloud terminal. It deploys **only the alert module** in
+incremental mode; it does not deploy the web app, Kubernetes workloads, or the
+rest of the lab. It never runs on push or pull request. Only `master` is allowed.
+The first run defaults to **preview only**.
+
+An owner with Azure role-assignment permission and GitHub repository
+administration access must configure the following once. This setup cannot be
+performed by an unauthenticated terminal or a GitHub token without environment
+administration permissions.
+
+1. In GitHub, open **Settings > Environments > New environment**, name it
+   `azure-lab`, restrict deployment branches to `master`, and add a required
+   reviewer where your plan supports it. Configure protection before running
+   the workflow; do not rely on an automatically created, unprotected environment.
+2. In Azure Portal, create a dedicated **user-assigned managed identity** in
+   the lab resource group. Under **Federated credentials > Add credential**,
+   select the GitHub Actions scenario, this repository's owner/name, entity
+   type **Environment**, and environment `azure-lab`. The issuer is
+   `https://token.actions.githubusercontent.com`, audience
+   `api://AzureADTokenExchange`, and subject
+   `repo:HendrikTilleman/azure-monitor-lab:environment:azure-lab` for this fork.
+   Change the subject when using another fork.
+3. On the **lab resource group's IAM**, grant that identity **Monitoring
+   Contributor** scoped to that resource group only. This built-in role grants
+   monitoring-resource management and ARM deployment operations; do not grant
+   subscription-wide Contributor or Owner. A stricter custom role can further
+   restrict writes to metric alerts and resource-group deployments if required.
+4. In the GitHub `azure-lab` environment, add the following **variables**
+   (not a client secret or credential JSON):
+
+| Variable | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | Managed identity's client ID, not its object/principal ID |
+| `AZURE_TENANT_ID` | Lab directory/tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Existing lab subscription ID |
+| `AZURE_RESOURCE_GROUP` | Existing lab resource group name |
+| `APPINSIGHTS_ID` | Full resource ID of the lab Application Insights component |
+| `ACTION_GROUP_ID` | Full resource ID of the existing lab action group |
+
+Both resource IDs must belong to the configured lab subscription and resource
+group; the workflow rejects other targets before Azure login. OIDC avoids
+stored Azure passwords and client secrets. Do not copy Azure tokens here or
+into GitHub variables.
+
+After merging the workflow into `master`, go to **Actions > Deploy mission
+alerts > Run workflow**, select `master`, and leave **Apply the alert** unchecked.
+Approve the environment request, if configured, and inspect the validation and
+what-if output. Expect changes only to `alert-orders-slo-burn`. Then run again
+with **Apply the alert** checked to deploy and read back its configuration.
+Runs are serialized; a newer request does not cancel an in-progress deployment.
+
+A green deployment proves the ARM settings were applied, **not** that telemetry
+arrived, a notification was delivered, or the alert fired/resolved on time.
+Complete the owner checks below. If login fails, check the exact federation
+subject/environment and identity IDs; if authorization fails, check the
+resource-group role assignment and allow for propagation. No password-based
+fallback is configured.
 
 The enabled metric rule `alert-orders-slo-burn` has severity 1, evaluates every
 minute and fires when the five-minute **Average** of `portal.order.failed` is
