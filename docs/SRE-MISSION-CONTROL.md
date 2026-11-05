@@ -1,10 +1,11 @@
 # SRE Mission Control
 
 The scenario is specified in [DESIGN.md](../DESIGN.md). **Implemented so far:
-work items 1 and 2: the ledger, report, portal API, business pulse and synthetic
-customers.** Mission operations, alerts, agent configuration and the screen are
-later work items. The portal is disabled by default; the opt-in manifests do not
-change existing lab deployment, traffic or Lab Operations runner behavior.
+work items 1-3: the ledger, report, portal API, business pulse, synthetic
+customers and orders SLO metric alert.** Mission operations, agent configuration
+and the screen are later work items. The portal is disabled by default; the
+opt-in manifests do not change existing lab deployment, traffic or Lab Operations
+runner behavior.
 
 ## Workload contracts
 
@@ -541,3 +542,164 @@ All eight concurrent incident orders timed out at 3.01-3.03 seconds while the
 catalog completed in 2.3 ms; a post-report order measured 0.18 ms queue wait.
 The report ramp was accelerated for this smoke check. These are local results,
 not the five-minute Azure telemetry comparison or an AKS acceptance claim.
+
+## Orders SLO alert (work item 3)
+
+`infra/modules/mission-alerts.bicep` is an opt-in resource-group module targeting
+the **existing lab Application Insights component** and notifying the **existing
+lab action group**. It does not modify the main Bicep/Terraform deployment.
+Automatic deployment by `mission-control.ps1 -Action Setup` belongs to work
+item 4; until then the owner can deploy it explicitly as shown below.
+
+The enabled metric rule `alert-orders-slo-burn` has severity 1, evaluates every
+minute and fires when the five-minute **Average** of `portal.order.failed` is
+**strictly greater than 0.05**. Auto-mitigation is enabled. Both its name and
+description contain `slo-burn`, independent of the screen's configurable nouns.
+The custom metric namespace is `azure.applicationinsights`; metric validation
+is skipped because the metric does not exist until valid portal orders run.
+This skips deployment-time validation, **not** the need to verify actual metric
+ingestion and namespace in Azure.
+
+The portal emits a raw 0/1 sample for every completed valid order. A business
+rejection contributes 0, not 1. Average, rather than Total, is required to
+measure the failure ratio. No dimensions split the rule into channel-specific
+alerts. Missing traffic is not healthy evidence and is not an SLO measurement.
+
+### Owner to verify: deploy, fire and recover
+
+Run against the existing lab resource group, with work item 2's portal/customer
+configuration and traffic already running. Do not select an unrelated component
+or action group. The module requires their resource IDs, not instrumentation
+keys. These commands are **not executed by CI**.
+
+```bash
+export RESOURCE_GROUP=rg-azure-monitor-lab
+export APPINSIGHTS_NAME='<existing lab Application Insights resource name>'
+export ACTION_GROUP_NAME='<existing lab action group name>'
+export APPINSIGHTS_ID="$(az monitor app-insights component show \
+  -g "$RESOURCE_GROUP" --app "$APPINSIGHTS_NAME" --query id -o tsv)"
+export ACTION_GROUP_ID="$(az monitor action-group show \
+  -g "$RESOURCE_GROUP" -n "$ACTION_GROUP_NAME" --query id -o tsv)"
+az deployment group validate -g "$RESOURCE_GROUP" \
+  --template-file infra/modules/mission-alerts.bicep \
+  --parameters appInsightsId="$APPINSIGHTS_ID" actionGroupId="$ACTION_GROUP_ID"
+az deployment group create -g "$RESOURCE_GROUP" -n mission-alerts \
+  --template-file infra/modules/mission-alerts.bicep \
+  --parameters appInsightsId="$APPINSIGHTS_ID" actionGroupId="$ACTION_GROUP_ID"
+az monitor metrics alert show -g "$RESOURCE_GROUP" -n alert-orders-slo-burn \
+  --query '{name:name,description:description,severity:severity,enabled:enabled,scopes:scopes,evaluationFrequency:evaluationFrequency,windowSize:windowSize,autoMitigate:autoMitigate,criteria:criteria,actions:actions}'
+az monitor metrics list --resource "$APPINSIGHTS_ID" \
+  --namespace azure.applicationinsights --metric portal.order.failed \
+  --aggregation Average --interval PT1M --offset 30m
+```
+
+Check the rule properties against the contract above, including the action
+group, `skipMetricValidation: true` and `GreaterThan`. Verify the metric contains
+actual baseline samples, not an empty series. If the custom metric cannot be
+used by metric alerts in this deployment, use the explicit fallback below;
+do not silently substitute a platform 5xx count.
+
+With the same customers Job still running, start a manual report and save the
+pods' measured start times. Poll actual Alerts Management instances:
+
+```bash
+export ALERT_RULE=alert-orders-slo-burn
+export SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export REPORT_JOB="month-end-report-slo-check-$(date +%s)"
+kubectl create job "$REPORT_JOB" -n demo --from=cronjob/month-end-report
+kubectl wait --for=jsonpath='{.status.active}'=4 job/"$REPORT_JOB" -n demo --timeout=90s
+kubectl get pods -n demo -l job-name="$REPORT_JOB" \
+  -o custom-columns=NAME:.metadata.name,STARTED:.status.startTime
+export ALERTS_URL="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/providers/Microsoft.AlertsManagement/alerts?api-version=2019-03-01&targetResource=$APPINSIGHTS_ID"
+for attempt in $(seq 1 11); do
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+  az rest --method get --url "$ALERTS_URL" \
+    --query "value[?properties.essentials.alertRule=='$ALERT_RULE'].{id:id,condition:properties.essentials.monitorCondition,fired:properties.essentials.startDateTime,changed:properties.essentials.lastModifiedDateTime}" \
+    --output json
+  sleep 30
+done
+```
+
+**Acceptance:** a new instance for this run fires within five minutes of the
+report pods starting. Compare `startDateTime` with the actual pod start time,
+not the time the query was run. Existing resolved instances do not count.
+Also inspect the rule's alert instances in Azure Portal, filtering to the lab
+resource group and this rule. Follow pagination (`nextLink`) if returned.
+Verify the lab action group receives the alert. Neither this module nor the
+check configures the SRE Agent or its response plans.
+
+Restore is not implemented until work item 4. For this incremental check,
+perform its relevant reversible action manually, then restore the nightly spec:
+
+```bash
+kubectl patch cronjob month-end-report -n demo --type merge -p '{"spec":{"suspend":true}}'
+kubectl patch job "$REPORT_JOB" -n demo --type merge -p '{"spec":{"suspend":true}}'
+kubectl apply -f workloads/k8s/08-month-end-report.yaml
+for attempt in $(seq 1 24); do
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+  az rest --method get --url "$ALERTS_URL" \
+    --query "value[?properties.essentials.alertRule=='$ALERT_RULE'].{id:id,condition:properties.essentials.monitorCondition,fired:properties.essentials.startDateTime,changed:properties.essentials.lastModifiedDateTime}" \
+    --output json
+  sleep 30
+done
+```
+
+Require the **same instance** to change from `Fired` to `Resolved` automatically
+while customers keep posting successfully. User-managed alert state
+(`New`/`Acknowledged`/`Closed`) is not the monitor condition. Resolution takes
+the rolling five-minute window plus Azure's stateful-alert recovery evaluations;
+it is not instantaneous on suspend. Measure both firing and resolution during
+rehearsal. This local build cannot establish Azure ingestion, notification or
+evaluation latency.
+
+### Log-search fallback (explicit owner choice, not auto-selected)
+
+If custom-metric alerting is unsupported for the deployed emission path, first
+confirm `PortalOrder` metrics/events and requests are arriving (work item 2).
+In **Application Insights Logs**, verify this query on the real order requests:
+
+```kusto
+requests
+| where timestamp > ago(5m)
+| where name == "POST /api/portal/orders"
+| where toint(resultCode) in (200, 502, 504)
+| summarize Attempts=sum(itemCount),
+            Failed=sumif(itemCount, success == false)
+| where Attempts > 0
+| project FailureRate=todouble(Failed)/Attempts
+```
+
+Only valid completed orders (200/502/504) belong to this SLO denominator; exclude
+401/400/413/429/configuration failures, as the business pulse does. Normal
+rejections remain successful 200s. The `Attempts > 0` guard produces **no row**
+for no traffic, rather than a made-up healthy value. `itemCount` preserves
+weighting if ingestion sampling is configured outside the SDK.
+
+In Azure Monitor, create a **stateful custom log search alert** scoped to the
+same lab Application Insights component, in a supported regional location:
+
+| Setting | Value |
+|---|---|
+| Name and description | `alert-orders-slo-burn-log`; description includes `slo-burn` and explicitly says log-search fallback |
+| Query | The request failure-ratio query above |
+| Measurement | Numeric column `FailureRate`, aggregation **Average**, no dimensions |
+| Condition | **Greater than 0.05** |
+| Lookback / evaluation | **5 minutes / 1 minute** |
+| Failing periods | **1 of 1** |
+| Severity / state | **1**, enabled, **automatically resolve alerts** (`autoMitigate: true`) |
+| Actions | The existing lab action group |
+
+Do not use a result-row Count threshold of 0.05: the numeric failure ratio,
+not the number of query rows, is the signal. Once the fallback is deployed and
+verified, disable the metric rule to avoid duplicate pages:
+
+```bash
+az monitor metrics alert update -g "$RESOURCE_GROUP" -n alert-orders-slo-burn --enabled false
+```
+
+Record the selected rule type, fallback reason, resource ID, query and measured
+fire/resolve timings in the run's notes and in this guide for the deployment.
+Repeat the fire/recover check with `ALERT_RULE=alert-orders-slo-burn-log`.
+Log ingestion adds latency; do **not** claim the metric
+rule's timing target passed if the fallback is slower. There is no automatic
+switch and no claim that Azure custom-metric support was verified here.
