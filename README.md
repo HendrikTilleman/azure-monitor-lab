@@ -11,6 +11,10 @@ A self-contained demo centered on Azure Monitor, AI, Azure Copilot Observability
 
 It's built for demos, microhacks, and hackathons. Deploy it, poke around, break it, restore it, and tear it down.
 
+## SRE Mission Control
+
+The planned **The Bridge Call That Never Happened** scenario extends the existing lab with a live Azure SRE Agent investigation. See [DESIGN.md](DESIGN.md) for the specification and incremental work items. Mission Control is not installed by the current lab deployment.
+
 ## Use The Lab
 
 | Experience | Start here |

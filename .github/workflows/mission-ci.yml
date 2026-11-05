@@ -1,0 +1,77 @@
+name: Mission CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Mission build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: workloads/webapp/package-lock.json
+      - name: Build the web frontend
+        working-directory: workloads/webapp
+        run: |
+          npm ci
+          npm run build
+      - name: Run mission Node tests when present
+        working-directory: workloads/webapp
+        run: |
+          shopt -s globstar nullglob
+          tests=(frontend/tests/**/*.test.{js,cjs,mjs} frontend/tests/**/*.spec.{js,cjs,mjs})
+          if ((${#tests[@]})); then
+            node --test "${tests[@]}"
+          else
+            echo 'No mission Node tests yet; they are added by later work items.'
+          fi
+      - name: Build and test the solution
+        run: |
+          dotnet build azure-monitor-lab.sln -c Release --nologo
+          dotnet test azure-monitor-lab.sln -c Release --no-build --nologo
+          # The existing test project is not included in the solution.
+          dotnet test workloads/webapp.Tests/AmlabHello.Tests.csproj -c Release --nologo
+      - name: Install the pinned Bicep CLI
+        run: |
+          az bicep install --version v0.37.4
+          echo "$HOME/.azure/bin" >> "$GITHUB_PATH"
+      - name: Compile mission Bicep modules when present
+        run: |
+          shopt -s nullglob
+          modules=(infra/modules/mission-*.bicep)
+          if ((${#modules[@]})); then
+            for module in "${modules[@]}"; do
+              bicep build "$module" --stdout > /dev/null
+            done
+          else
+            echo 'No mission Bicep modules yet; they are added by later work items.'
+          fi
+      - name: Analyze mission PowerShell scripts when present
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Repository PSGallery -Force
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.24.0
+          $scripts = @(Get-ChildItem scripts -File | Where-Object {
+            $_.Name -like 'mission-*.ps1' -or $_.Name -like 'setup-mission-*.ps1'
+          })
+          if ($scripts.Count -eq 0) {
+            Write-Host 'No mission PowerShell scripts yet; they are added by later work items.'
+          }
+          foreach ($script in $scripts) {
+            Invoke-ScriptAnalyzer -Path $script.FullName -Severity Error,Warning -EnableExit
+          }
