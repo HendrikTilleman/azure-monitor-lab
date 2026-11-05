@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.37.4.10188",
-      "templateHash": "4541774925241986220"
+      "templateHash": "2014416476613904893"
     }
   },
   "parameters": {
@@ -84,6 +84,13 @@
       "defaultValue": "Standard_B2s",
       "metadata": {
         "description": "AKS node VM size."
+      }
+    },
+    "vmssSize": {
+      "type": "string",
+      "defaultValue": "Standard_B1s",
+      "metadata": {
+        "description": "VM size for the predictive-autoscale scale set."
       }
     },
     "aksNodeCount": {
@@ -13158,7 +13165,7 @@
             "value": "[parameters('location')]"
           },
           "vmSize": {
-            "value": "Standard_B1s"
+            "value": "[parameters('vmssSize')]"
           },
           "adminUsername": {
             "value": "[parameters('vmAdminUsername')]"

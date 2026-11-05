@@ -22,6 +22,15 @@
 .PARAMETER ParametersFile
   Bicep parameters file. Defaults to infra/main.parameters.json.
 
+.PARAMETER VmSize
+  Demo VM size. Explicit value overrides the parameters file; otherwise use its value or Standard_B2s.
+
+.PARAMETER AksNodeVmSize
+  AKS node size. Explicit value overrides the parameters file; otherwise use its value or Standard_B2s.
+
+.PARAMETER VmssSize
+  Predictive-autoscale scale-set size. Defaults to the parameters file value or Standard_B1s.
+
 .EXAMPLE
   ./scripts/deploy.ps1
 
@@ -36,6 +45,9 @@ param(
   [string] $ParametersFile = (Join-Path $PSScriptRoot '..' 'infra' 'main.parameters.json'),
   [switch] $SkipPreflight,
   [int]    $MaxDeployRetries = 0,
+  [string] $VmSize = 'Standard_B2s',
+  [string] $AksNodeVmSize = 'Standard_B2s',
+  [string] $VmssSize = 'Standard_B1s',
   [guid[]] $ConsoleOperatorObjectIds
 )
 
@@ -87,6 +99,20 @@ if (Test-Path $labConfigPath) {
   }
 }
 
+# Use the same effective sizes for preflight and ARM, including legacy parameter-file overrides.
+if (Test-Path $ParametersFile) {
+  $sizingParameters = (Get-Content -Raw $ParametersFile | ConvertFrom-Json).parameters
+  if (-not $PSBoundParameters.ContainsKey('VmSize') -and $sizingParameters.vmSize.value) {
+    $VmSize = $sizingParameters.vmSize.value
+  }
+  if (-not $PSBoundParameters.ContainsKey('AksNodeVmSize') -and $sizingParameters.aksNodeVmSize.value) {
+    $AksNodeVmSize = $sizingParameters.aksNodeVmSize.value
+  }
+  if (-not $PSBoundParameters.ContainsKey('VmssSize') -and $sizingParameters.vmssSize.value) {
+    $VmssSize = $sizingParameters.vmssSize.value
+  }
+}
+
 # -------------------------------------------------------------------
 # Subscription guardrail — hard-fail if not pointed at the lab sub.
 # -------------------------------------------------------------------
@@ -122,6 +148,7 @@ if ($SkipPreflight) {
   Write-Step "Pre-flight: validating SKUs + quota + resource availability in $Location"
   $preflight = Join-Path $PSScriptRoot 'preflight-check.ps1'
   & $preflight -Location $Location `
+               -VmSize $VmSize -AksNodeVmSize $AksNodeVmSize -VmssSize $VmssSize `
                -AksNodeCount $pfAksNodeCount `
                -DeployWindowsVm $pfDeployWindowsVm `
                -DeployLinuxVm $pfDeployLinuxVm `
@@ -203,6 +230,7 @@ while ($true) {
     --template-file $mainBicep `
     --parameters "@$ParametersFile" `
     --parameters location=$Location `
+    --parameters vmSize=$VmSize aksNodeVmSize=$AksNodeVmSize vmssSize=$VmssSize `
     --output none
 
   if ($LASTEXITCODE -eq 0) { break }
