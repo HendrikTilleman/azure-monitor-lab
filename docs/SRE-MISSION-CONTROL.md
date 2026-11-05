@@ -555,7 +555,8 @@ the manually triggered GitHub Actions workflow.
 ### Deploy from GitHub Actions (service principal)
 
 For a **new subscription without a lab**, first use **Actions > Deploy full
-Azure Monitor lab**, select `master`, and type `DEPLOY`. This creates billable
+Azure Monitor lab**, select `master`, uncheck **Only check availability and
+quota**, and type `DEPLOY`. This creates billable
 resources using `scripts/deploy.ps1`, including its preflight and post-deployment
 steps, then deploys the orders alert. It is not the alert-only workflow below.
 The deployment identity needs Azure role/policy creation permissions (Owner
@@ -581,6 +582,15 @@ render the mission Kubernetes secrets/manifests, or inject a report incident.
 Those are still the explicit mission setup steps in this guide.
 Failed deployments may leave billable resources; review the workflow failure
 and resource-group inventory rather than assuming rollback or retrying blindly.
+
+For a **read-only regional capacity check**, leave **Only check availability
+and quota** checked and enter `CHECK` instead. Set the optional **lab region
+override** (for example `swedencentral`) to test another region without editing
+the configuration secret. This uses the same preflight script, configured node
+count and VM toggles; a failed check fails the run. It does not create the
+resource group or call deployment/post-deployment scripts. The region override
+also applies to an explicitly confirmed deployment, but does not change the
+template's separately pinned App Service or optional agent regions.
 
 `.github/workflows/deploy-mission-alerts.yml` runs on a GitHub-hosted runner,
 not the interactive cloud terminal. It deploys **only the alert module** in
