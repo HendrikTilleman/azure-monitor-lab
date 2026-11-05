@@ -214,7 +214,10 @@ function az {
 function Invoke-RestMethod {
   [CmdletBinding()]
   param($Method, $Uri, $Headers, $Body, $ContentType, $TimeoutSec)
-  if ($Uri -like 'https://graph.microsoft.com/v1.0/me*') {
+  if ($Uri -like 'https://graph.microsoft.com/v1.0/me*' -or $Uri -like 'https://graph.microsoft.com/v1.0/users/*') {
+    if ($fixture.AppOnly -and $Uri -like 'https://graph.microsoft.com/v1.0/me*') {
+      throw 'Service-principal authentication must not call /me.'
+    }
     if ($fixture.FailGraphAuth) {
       $exception = [Exception]::new('TokenCreatedWithOutdatedPolicies')
       $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 401 })
@@ -243,6 +246,17 @@ try {
   if ($config.Operations.Image -notmatch '@sha256:[a-f0-9]{64}$') { throw 'Runner image is not immutable.' }
   if ($fixture.AuthCalls -ne 1 -or $fixture.Settings.Existing -ne 'preserve-me' -or $fixture.Roles.Count -ne 2) { throw 'Automatic access setup or settings preservation failed.' }
   if ($fixture.Writes[0]['LabConsole__Operations__Enabled'] -ne 'false' -or $fixture.Writes[-1]['LabConsole__Operations__Enabled'] -ne 'True') { throw 'Operations enablement is not gated on setup completion.' }
+  Reset-Configuration
+  $fixture.AppOnly = $true
+  & (Join-Path $scriptDirectory 'initialize-webapp-console.ps1') @parameters -AllowedUserObjectIds @([guid]$fixture.Operator) | Out-Null
+  $fixture.FailGraphAuth = $true
+  $before = $fixture.Writes.Count
+  $caught = $false
+  try { & (Join-Path $scriptDirectory 'initialize-webapp-console.ps1') @parameters -AllowedUserObjectIds @([guid]$fixture.Operator) | Out-Null }
+  catch { $caught = $true }
+  if (-not $caught -or $fixture.Writes.Count -ne $before) { throw 'App-only Graph authentication failure must stop before writes.' }
+  $fixture.FailGraphAuth = $false
+  $fixture.AppOnly = $false
   Reset-Configuration
   $fixture.ExistingTags = $false
   & (Join-Path $scriptDirectory 'initialize-webapp-console.ps1') @parameters | Out-Null

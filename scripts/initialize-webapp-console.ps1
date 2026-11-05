@@ -62,7 +62,13 @@ try {
     $tokens[$hostName] = az account get-access-token --subscription $SubscriptionId --resource "https://$hostName/" --query accessToken --output tsv --only-show-errors
     if ($LASTEXITCODE -ne 0 -or -not $tokens[$hostName]) { throw 'Required setup authentication is unavailable.' }
   }
-  $null = Invoke-ConsoleApi GET 'https://graph.microsoft.com/v1.0/me?$select=id'
+  if ($AllowedUserObjectIds) {
+    foreach ($operatorId in $AllowedUserObjectIds) {
+      $null = Invoke-ConsoleApi GET "https://graph.microsoft.com/v1.0/users/$operatorId`?`$select=id"
+    }
+  } else {
+    $null = Invoke-ConsoleApi GET 'https://graph.microsoft.com/v1.0/me?$select=id'
+  }
   $config = Get-Content -LiteralPath $ConsoleConfigPath -Raw | ConvertFrom-Json -AsHashtable
   if (-not $config.LabConsole -or $config.LabConsole.ResourceGroup -ne $ResourceGroup) { throw 'Generated console configuration does not match this deployment.' }
   $resourceBase = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"

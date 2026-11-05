@@ -554,6 +554,34 @@ the manually triggered GitHub Actions workflow.
 
 ### Deploy from GitHub Actions (service principal)
 
+For a **new subscription without a lab**, first use **Actions > Deploy full
+Azure Monitor lab**, select `master`, and type `DEPLOY`. This creates billable
+resources using `scripts/deploy.ps1`, including its preflight and post-deployment
+steps, then deploys the orders alert. It is not the alert-only workflow below.
+The deployment identity needs Azure role/policy creation permissions (Owner
+for this disposable lab) and administrator-consented Microsoft Graph
+`Application.ReadWrite.All` and `User.Read.All` application permissions for
+operator sign-in provisioning. Azure Owner alone does not grant Graph access.
+
+Set repository secret `LAB_CONFIG_JSON` to a completed copy of
+`lab.config.json.example`, including the VM password, real alert email and
+your user object ID in `grafanaAdminObjectId`. Also add
+`"consoleOperatorObjectIds": ["<your Entra user object ID>"]` for noninteractive
+operator setup. Its subscription/tenant must match the configured Azure IDs;
+placeholders or missing operator IDs stop the workflow before Azure changes.
+The secret is written only to private, temporary runner configuration files,
+never uploaded as an artifact; generated files and Azure credentials are
+removed at job completion. The normal lab script validates availability/quota
+before creating the resource group. Do not bypass these checks to force a
+deployment into an unsupported region. Optional AI/SRE/Observability Agent
+stages remain off unless explicitly enabled in the configuration.
+
+The full workflow does not enable the separate mission portal settings,
+render the mission Kubernetes secrets/manifests, or inject a report incident.
+Those are still the explicit mission setup steps in this guide.
+Failed deployments may leave billable resources; review the workflow failure
+and resource-group inventory rather than assuming rollback or retrying blindly.
+
 `.github/workflows/deploy-mission-alerts.yml` runs on a GitHub-hosted runner,
 not the interactive cloud terminal. It deploys **only the alert module** in
 incremental mode; it does not deploy the web app, Kubernetes workloads, or the

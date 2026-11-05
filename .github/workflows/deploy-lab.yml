@@ -1,0 +1,147 @@
+name: Deploy full Azure Monitor lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type DEPLOY to create billable lab resources
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-lab-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/master' && inputs.confirm == 'DEPLOY'
+    environment: azure-lab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: workloads/webapp/package-lock.json
+      - name: Validate and materialize private lab configuration
+        shell: bash
+        env:
+          LAB_CONFIG_JSON: ${{ secrets.LAB_CONFIG_JSON }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, uuid
+          from pathlib import Path
+          try:
+              config = json.loads(os.environ["LAB_CONFIG_JSON"])
+          except (ValueError, KeyError):
+              raise SystemExit("Set LAB_CONFIG_JSON to a valid, completed lab configuration JSON object.")
+          if not isinstance(config, dict):
+              raise SystemExit("LAB_CONFIG_JSON must be a JSON object.")
+          for field in ("subscriptionId", "tenantId", "resourceGroup", "location",
+                        "namePrefix", "alertEmail", "vmAdminPassword", "grafanaAdminObjectId"):
+              if not isinstance(config.get(field), str) or not config[field] or "<" in config[field]:
+                  raise SystemExit(f"Missing or placeholder lab configuration field: {field}")
+          for field, env_name in (("subscriptionId", "AZURE_SUBSCRIPTION_ID"),
+                                  ("tenantId", "AZURE_TENANT_ID")):
+              try:
+                  matches = uuid.UUID(config[field]) == uuid.UUID(os.environ.get(env_name, ""))
+              except ValueError:
+                  matches = False
+              if not matches:
+                  raise SystemExit(f"{field} must match {env_name}. No Azure changes made.")
+          try:
+              uuid.UUID(os.environ.get("AZURE_CLIENT_ID", ""))
+              assert uuid.UUID(config["grafanaAdminObjectId"]).int != 0
+              operators = config["consoleOperatorObjectIds"]
+              assert isinstance(operators, list) and operators
+              for operator in operators:
+                  assert uuid.UUID(operator).int != 0
+          except (ValueError, KeyError, TypeError, AssertionError):
+              raise SystemExit("Provide valid Azure client, Grafana user and console operator object IDs.")
+          if not re.fullmatch(r"[a-z0-9]{3,8}", config["namePrefix"]):
+              raise SystemExit("namePrefix must be 3-8 lowercase letters/digits.")
+          if not re.fullmatch(r"[A-Za-z0-9_().-]{1,90}", config["resourceGroup"]) or config["resourceGroup"].endswith("."):
+              raise SystemExit("Invalid lab resourceGroup.")
+          if not re.fullmatch(r"[a-z]+[a-z0-9]*", config["location"]):
+              raise SystemExit("Invalid lab location.")
+          if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", config["alertEmail"]):
+              raise SystemExit("Invalid notification email.")
+          password = config["vmAdminPassword"]
+          if not 16 <= len(password) <= 72 or sum(bool(re.search(p, password)) for p in (r"[A-Z]", r"[a-z]", r"[0-9]", r"[^A-Za-z0-9]")) < 3:
+              raise SystemExit("VM password must be 16-72 characters and contain at least three character classes.")
+          # Mask individual values as well as the multi-line repository secret.
+          for field in ("vmAdminPassword", "alertEmail"):
+              value = config[field].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::add-mask::{value}")
+          path = Path("lab.config.json")
+          descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w") as output:
+              json.dump(config, output)
+          PY
+      - name: Sign in with the repository service principal
+        shell: bash
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.azure_lab }}
+        run: |
+          if [[ -z "$AZURE_CLIENT_SECRET" ]]; then
+            echo '::error::Set the azure_lab service-principal password secret.'
+            exit 1
+          fi
+          az login --service-principal --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az bicep install --version v0.37.4
+      - name: Build frontend
+        working-directory: workloads/webapp
+        run: npm ci && npm run build
+      - name: Install Kubernetes clients
+        shell: bash
+        run: |
+          az aks install-cli --install-location "$RUNNER_TEMP/bin/kubectl" \
+            --kubelogin-install-location "$RUNNER_TEMP/bin/kubelogin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Deploy and complete the existing lab
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = Get-Content lab.config.json -Raw | ConvertFrom-Json
+          $operators = @($config.consoleOperatorObjectIds | ForEach-Object { [guid]$_ })
+          ./scripts/deploy.ps1 -ConsoleOperatorObjectIds $operators
+      - name: Deploy orders SLO alert
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $config = Get-Content lab.config.json -Raw | ConvertFrom-Json
+          $scope = "/subscriptions/$($config.subscriptionId)/resourceGroups/$($config.resourceGroup)/providers/Microsoft.Insights"
+          az deployment group create --resource-group $config.resourceGroup `
+            --name "mission-alerts-$env:GITHUB_RUN_ID" `
+            --template-file infra/modules/mission-alerts.bicep `
+            --parameters "appInsightsId=$scope/components/appi-$($config.namePrefix)" "actionGroupId=$scope/actionGroups/ag-$($config.namePrefix)-email"
+          $alert = az monitor metrics alert show --resource-group $config.resourceGroup `
+            --name alert-orders-slo-burn --output json | ConvertFrom-Json
+          if ($alert.severity -ne 1 -or -not $alert.enabled -or -not $alert.autoMitigate) {
+            throw 'Deployed orders alert configuration does not match the contract.'
+          }
+          'Lab deployment scripts completed; orders alert deployed. Mission portal/workload opt-in setup and live alert checks remain separate.' >> $env:GITHUB_STEP_SUMMARY
+      - name: Clear credentials and private configuration
+        if: always()
+        shell: bash
+        run: |
+          az account clear
+          rm -f lab.config.json .azure-target.json infra/main.parameters.json terraform/stages.tfvars
