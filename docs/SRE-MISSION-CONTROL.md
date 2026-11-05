@@ -592,6 +592,15 @@ resource group or call deployment/post-deployment scripts. The region override
 also applies to an explicitly confirmed deployment, but does not change the
 template's separately pinned App Service or optional agent regions.
 
+Select **VM sizing > bsv2** to use `Standard_B2s_v2` (2 vCPU, 8 GiB)
+for both demo VMs, each AKS node and the autoscaling scale set. This also applies
+to the read-only preflight, including per-family and total vCPU demand.
+The original sizing remains the default. The scale set changes from one
+vCPU to two when Bsv2 is selected; account for its different cost and quota.
+For direct PowerShell deployments, pass `-VmSize`, `-AksNodeVmSize` and
+`-VmssSize` to `scripts/deploy.ps1`; those exact values are passed to both
+preflight and ARM. This selection does not change the Terraform/staged defaults.
+
 `.github/workflows/deploy-mission-alerts.yml` runs on a GitHub-hosted runner,
 not the interactive cloud terminal. It deploys **only the alert module** in
 incremental mode; it does not deploy the web app, Kubernetes workloads, or the

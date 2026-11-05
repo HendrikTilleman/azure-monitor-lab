@@ -44,6 +44,9 @@ param vmSize string = 'Standard_B2s'
 @description('AKS node VM size.')
 param aksNodeVmSize string = 'Standard_B2s'
 
+@description('VM size for the predictive-autoscale scale set.')
+param vmssSize string = 'Standard_B1s'
+
 @description('AKS node count.')
 param aksNodeCount int = 1
 
@@ -626,7 +629,7 @@ module vmss 'modules/vmss.bicep' = {
   params: {
     name: vmssName
     location: location
-    vmSize: 'Standard_B1s'
+    vmSize: vmssSize
     adminUsername: vmAdminUsername
     adminPassword: vmAdminPassword
     subnetId: network.outputs.workloadSubnetId

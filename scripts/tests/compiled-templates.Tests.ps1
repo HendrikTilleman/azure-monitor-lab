@@ -4,6 +4,13 @@ param([string] $BicepExecutable)
 $ErrorActionPreference = 'Stop'
 $source = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $mainTemplate = Get-Content -LiteralPath (Join-Path $source 'infra/main.json') -Raw | ConvertFrom-Json
+if ($mainTemplate.parameters.vmssSize.defaultValue -ne 'Standard_B1s') {
+  throw 'The original scale-set size must remain the default.'
+}
+$scaleSetModule = @($mainTemplate.resources | Where-Object name -eq 'vmss')
+if ($scaleSetModule.Count -ne 1 -or $scaleSetModule[0].properties.parameters.vmSize.value -cne "[parameters('vmssSize')]") {
+  throw 'The selected scale-set size must reach the VMSS module.'
+}
 $vmModules = @($mainTemplate.resources | Where-Object name -in @('vm-linux', 'vm-windows'))
 if ($vmModules.Count -ne 2) { throw 'The main template must contain both demo VM modules.' }
 foreach ($vmModule in $vmModules) {

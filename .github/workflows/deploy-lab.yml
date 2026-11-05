@@ -17,6 +17,14 @@ on:
         required: false
         default: ''
         type: string
+      vm_family:
+        description: VM sizing for demo VMs, AKS nodes and scale set
+        required: true
+        default: original
+        type: choice
+        options:
+          - original
+          - bsv2
 
 permissions:
   contents: read
@@ -36,6 +44,7 @@ jobs:
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
       AZURE_CORE_OUTPUT: none
+      LAB_VM_FAMILY: ${{ inputs.vm_family }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -143,7 +152,13 @@ jobs:
           $windows = if ($null -eq $config.deployWindowsVm) { $true } else { [bool]$config.deployWindowsVm }
           $agent = [bool]$config.stageToggles.enableStageObservabilityAgent
           $agentLocation = if ($config.observabilityAgentLocation) { $config.observabilityAgentLocation } else { 'westeurope' }
+          $sizes = if ($env:LAB_VM_FAMILY -eq 'bsv2') {
+            @{ VmSize = 'Standard_B2s_v2'; AksNodeVmSize = 'Standard_B2s_v2'; VmssSize = 'Standard_B2s_v2' }
+          } else {
+            @{ VmSize = 'Standard_B2s'; AksNodeVmSize = 'Standard_B2s'; VmssSize = 'Standard_B1s' }
+          }
           ./scripts/preflight-check.ps1 -Location $config.location -AksNodeCount $nodeCount `
+            @sizes `
             -DeployLinuxVm $linux -DeployWindowsVm $windows -ResourceGroup $config.resourceGroup `
             -DeployObservabilityAgent $agent -ObservabilityAgentLocation $agentLocation
           "Read-only preflight passed in $($config.location). No resource deployment was performed." >> $env:GITHUB_STEP_SUMMARY
@@ -154,7 +169,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $config = Get-Content lab.config.json -Raw | ConvertFrom-Json
           $operators = @($config.consoleOperatorObjectIds | ForEach-Object { [guid]$_ })
-          ./scripts/deploy.ps1 -ConsoleOperatorObjectIds $operators
+          $sizes = if ($env:LAB_VM_FAMILY -eq 'bsv2') {
+            @{ VmSize = 'Standard_B2s_v2'; AksNodeVmSize = 'Standard_B2s_v2'; VmssSize = 'Standard_B2s_v2' }
+          } else {
+            @{ VmSize = 'Standard_B2s'; AksNodeVmSize = 'Standard_B2s'; VmssSize = 'Standard_B1s' }
+          }
+          ./scripts/deploy.ps1 -ConsoleOperatorObjectIds $operators @sizes
       - name: Deploy orders SLO alert
         if: ${{ !inputs.check_only }}
         shell: pwsh
